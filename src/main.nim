@@ -58,8 +58,8 @@ const
   Gravity = 22.0'f32
   JumpForce = 8.5'f32
   EyeHeight = 1.8'f32
-  ViewDistance = 100.0'f32
-  Step = 2.5'f32
+  ViewDistance = 400.0'f32 # Aumentado em 4x
+  Step = 5.0'f32 # Aumentado para otimização em longa distância
 
 let startHeight = getHeight(0.0'f32, 0.0'f32)
 var
@@ -156,6 +156,24 @@ while not windowShouldClose():
           let x1 = x0 + Step
           let z0 = gridCenterZ + float32(cz) * Step
           let z1 = z0 + Step
+          
+          # --- Simple Frustum / FOV Culling ---
+          let centerX = x0 + Step * 0.5'f32
+          let centerZ = z0 + Step * 0.5'f32
+          let centerY = getHeight(centerX, centerZ)
+          
+          let toCellX = centerX - camera.position.x
+          let toCellY = centerY - camera.position.y
+          let toCellZ = centerZ - camera.position.z
+          let distSq = toCellX*toCellX + toCellY*toCellY + toCellZ*toCellZ
+          
+          # Se estiver longe, verifica se está dentro do cone de visão da câmera
+          if distSq > 15.0'f32 * 15.0'f32:
+            let dist = sqrt(distSq)
+            let cosAngle = (toCellX * targetDirX + toCellY * targetDirY + toCellZ * targetDirZ) / dist
+            # Culling: Se o ângulo for maior que 60 graus (cos < 0.5), descarta a célula
+            if cosAngle < 0.5'f32:
+              continue
           
           let y00 = getHeight(x0, z0)
           let y10 = getHeight(x1, z0)
