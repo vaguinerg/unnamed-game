@@ -14,18 +14,15 @@ type
 
 # --- Variáveis Globais do Vulto de Terror ---
 var
-  gameRandState: uint32 = 987654
   vultoAtivo: bool = false
+  vultoEmMovimento: bool = false
+  vultoTreeX: float32 = 0.0'f32
+  vultoTreeZ: float32 = 0.0'f32
   vultoPos: Vector3
   vultoStartPos: Vector3
   vultoEndPos: Vector3
   vultoProgress: float32 = 0.0'f32
   vultoSpeed: float32 = 0.0'f32
-  vultoTimer: float32 = 5.0'f32 # Primeiro vulto após 5 segundos
-
-proc gameRand(): float32 =
-  gameRandState = gameRandState * 1664525 + 1013904223
-  return float32(gameRandState and 0xFFFFFF) / 16777216.0'f32
 
 # --- Gerador Aleatório Determinístico para Células (PRNG) ---
 type
@@ -248,28 +245,156 @@ proc drawTrees(camera: Camera, targetDirX, targetDirY, targetDirZ: float32, ligh
 
             drawSphere(leafPos, leafRadius, leafColor)
 
-# --- Função para disparar o evento do Vulto de Terror ---
-proc dispararVultoDeTerror(camera: Camera, targetDirX, targetDirY, targetDirZ: float32) =
+# --- Função para disparar a movimentação do Vulto de Terror ---
+proc dispararVultoDeTerror(camera: Camera, moveAway: bool) =
+  if vultoEmMovimento: return
+
   const
     TreeCellSize = 40.0'f32
     TreeDensity = 0.20'f32
-    ViewDist = 350.0'f32
-    
-    # Parâmetro do meio-termo
+    TargetMidDist = 140.0'f32
+    MinPlayerDist = 60.0'f32
+
+  # Direção da mira do jogador para priorizar vizinhos que estejam no campo de visão
+  let tDirX = camera.target.x - camera.position.x
+  let tDirY = camera.target.y - camera.position.y
+  let tDirZ = camera.target.z - camera.position.z
+  let tLen = sqrt(tDirX*tDirX + tDirY*tDirY + tDirZ*tDirZ)
+  let camDirX = if tLen > 0.001'f32: tDirX / tLen else: 0.0'f32
+  let camDirZ = if tLen > 0.001'f32: tDirZ / tLen else: 0.0'f32
+
+  let currentDist = sqrt(
+    (vultoTreeX - camera.position.x) * (vultoTreeX - camera.position.x) +
+    (vultoTreeZ - camera.position.z) * (vultoTreeZ - camera.position.z)
+  )
+
+  var bestNeighborX = 0.0'f32
+  var bestNeighborZ = 0.0'f32
+  var foundNeighbor = false
+  var minDiff = 999999.0'f32
+
+  let currentCellX = round(vultoTreeX / TreeCellSize)
+  let currentCellZ = round(vultoTreeZ / TreeCellSize)
+
+  # 1. Procura vizinhos em um raio de até 5 células ao redor da posição atual do vulto
+  for cz in -5 .. 5:
+    for cx in -5 .. 5:
+      if cx == 0 and cz == 0: continue
+      let cellX = int(currentCellX) + cx
+      let cellZ = int(currentCellZ) + cz
+
+      var r = initRand(cellX, cellZ)
+      if r.nextFloat() < TreeDensity:
+        let offsetX = r.nextFloat() * TreeCellSize
+        let offsetZ = r.nextFloat() * TreeCellSize
+        let treeX = float32(cellX) * TreeCellSize + offsetX
+        let treeZ = float32(cellZ) * TreeCellSize + offsetZ
+
+        let treeY = getTerrainHeight(treeX, treeZ)
+        if treeY >= 2.5'f32:
+          continue
+
+        # Distância deste vizinho até a árvore atual do vulto
+        let dxToCurrent = treeX - vultoTreeX
+        let dzToCurrent = treeZ - vultoTreeZ
+        let distToCurrentSq = dxToCurrent*dxToCurrent + dzToCurrent*dzToCurrent
+        
+        # O vizinho deve estar a uma distância razoável (entre 15 e 150 unidades)
+        if distToCurrentSq < 15.0'f32 * 15.0'f32 or distToCurrentSq > 150.0'f32 * 150.0'f32:
+          continue
+
+        # Distância deste vizinho até o jogador
+        let toPlayerX = treeX - camera.position.x
+        let toPlayerZ = treeZ - camera.position.z
+        let distToPlayer = sqrt(toPlayerX*toPlayerX + toPlayerZ*toPlayerZ)
+
+        # Deve respeitar a distância mínima de segurança do jogador
+        if distToPlayer < MinPlayerDist:
+          continue
+
+        # Condição de afastamento ou aproximação em relação ao jogador
+        if moveAway and distToPlayer <= currentDist + 5.0'f32:
+          continue
+        if (not moveAway) and distToPlayer >= currentDist - 5.0'f32:
+          continue
+
+        # Prioriza vizinhos que estejam na frente da câmera (FOV)
+        let cosAngle = (toPlayerX * camDirX + toPlayerZ * camDirZ) / distToPlayer
+        let fovMult = if cosAngle >= 0.4'f32: 1.0'f32 else: 2.0'f32
+
+        let diff = abs(distToPlayer - TargetMidDist) * fovMult
+        if diff < minDiff:
+          minDiff = diff
+          bestNeighborX = treeX
+          bestNeighborZ = treeZ
+          foundNeighbor = true
+
+  # Fallback se não encontrar vizinho com a direção perfeita: aceita qualquer vizinho válido que aproxime da distância alvo
+  if not foundNeighbor:
+    minDiff = 999999.0'f32
+    for cz in -5 .. 5:
+      for cx in -5 .. 5:
+        if cx == 0 and cz == 0: continue
+        let cellX = int(currentCellX) + cx
+        let cellZ = int(currentCellZ) + cz
+
+        var r = initRand(cellX, cellZ)
+        if r.nextFloat() < TreeDensity:
+          let offsetX = r.nextFloat() * TreeCellSize
+          let offsetZ = r.nextFloat() * TreeCellSize
+          let treeX = float32(cellX) * TreeCellSize + offsetX
+          let treeZ = float32(cellZ) * TreeCellSize + offsetZ
+
+          let treeY = getTerrainHeight(treeX, treeZ)
+          if treeY >= 2.5'f32:
+            continue
+
+          let dxToCurrent = treeX - vultoTreeX
+          let dzToCurrent = treeZ - vultoTreeZ
+          let distToCurrentSq = dxToCurrent*dxToCurrent + dzToCurrent*dzToCurrent
+          
+          if distToCurrentSq < 15.0'f32 * 15.0'f32 or distToCurrentSq > 150.0'f32 * 150.0'f32:
+            continue
+
+          let toPlayerX = treeX - camera.position.x
+          let toPlayerZ = treeZ - camera.position.z
+          let distToPlayer = sqrt(toPlayerX*toPlayerX + toPlayerZ*toPlayerZ)
+
+          if distToPlayer < MinPlayerDist:
+            continue
+
+          let diff = abs(distToPlayer - TargetMidDist)
+          if diff < minDiff:
+            minDiff = diff
+            bestNeighborX = treeX
+            bestNeighborZ = treeZ
+            foundNeighbor = true
+
+  if foundNeighbor:
+    vultoStartPos = vultoPos
+    vultoEndPos = Vector3(x: bestNeighborX, y: getTerrainHeight(bestNeighborX, bestNeighborZ), z: bestNeighborZ)
+    vultoProgress = 0.0'f32
+    vultoSpeed = 1.0'f32 # Completa o percurso em exatamente 1 segundo
+    vultoEmMovimento = true
+
+# --- Função para posicionar o Vulto inicialmente no jogo ---
+proc inicializarVultoDeTerror(camera: Camera) =
+  const
+    TreeCellSize = 40.0'f32
+    TreeDensity = 0.20'f32
     TargetMidDist = 140.0'f32
 
   let gridCenterX = round(camera.position.x / TreeCellSize)
   let gridCenterZ = round(camera.position.z / TreeCellSize)
-  let halfCells = int(ViewDist / TreeCellSize)
+  let searchRadius = 6
 
   var bestTreeX = 0.0'f32
   var bestTreeZ = 0.0'f32
   var minDiff = 999999.0'f32
-  var foundStart = false
+  var found = false
 
-  # 1. Encontra a árvore visível mais próxima da distância do meio-termo (140 unidades)
-  for cz in -halfCells .. halfCells:
-    for cx in -halfCells .. halfCells:
+  for cz in -searchRadius .. searchRadius:
+    for cx in -searchRadius .. searchRadius:
       let cellX = int(gridCenterX) + cx
       let cellZ = int(gridCenterZ) + cz
 
@@ -284,70 +409,29 @@ proc dispararVultoDeTerror(camera: Camera, targetDirX, targetDirY, targetDirZ: f
         if treeY >= 2.5'f32:
           continue
 
-        let toTreeX = treeX - camera.position.x
-        let toTreeZ = treeZ - camera.position.z
-        let distSq = toTreeX*toTreeX + toTreeZ*toTreeZ
+        let toPlayerX = treeX - camera.position.x
+        let toPlayerZ = treeZ - camera.position.z
+        let dist = sqrt(toPlayerX*toPlayerX + toPlayerZ*toPlayerZ)
 
-        if distSq < ViewDist * ViewDist:
-          let dist = sqrt(distSq)
-          let cosAngle = (toTreeX * targetDirX + toTreeZ * targetDirZ) / dist
-          if cosAngle >= 0.5'f32: # Visível na tela
-            let diff = abs(dist - TargetMidDist)
-            if diff < minDiff:
-              minDiff = diff
-              bestTreeX = treeX
-              bestTreeZ = treeZ
-              foundStart = true
+        let diff = abs(dist - TargetMidDist)
+        if diff < minDiff:
+          minDiff = diff
+          bestTreeX = treeX
+          bestTreeZ = treeZ
+          found = true
 
-  if not foundStart:
-    return
-
-  # 2. Encontra a árvore vizinha mais próxima
-  var nearestTreeX = 0.0'f32
-  var nearestTreeZ = 0.0'f32
-  var minDistSq = 999999.0'f32
-  var foundEnd = false
-
-  let startCellX = round(bestTreeX / TreeCellSize)
-  let startCellZ = round(bestTreeZ / TreeCellSize)
-
-  for cz in -3 .. 3:
-    for cx in -3 .. 3:
-      if cx == 0 and cz == 0: continue
-      let cellX = int(startCellX) + cx
-      let cellZ = int(startCellZ) + cz
-
-      var r = initRand(cellX, cellZ)
-      if r.nextFloat() < TreeDensity:
-        let offsetX = r.nextFloat() * TreeCellSize
-        let offsetZ = r.nextFloat() * TreeCellSize
-        let treeX = float32(cellX) * TreeCellSize + offsetX
-        let treeZ = float32(cellZ) * TreeCellSize + offsetZ
-
-        let treeY = getTerrainHeight(treeX, treeZ)
-        if treeY >= 2.5'f32:
-          continue
-
-        let dx = treeX - bestTreeX
-        let dz = treeZ - bestTreeZ
-        let distSq = dx*dx + dz*dz
-
-        if distSq > 1.0'f32 and distSq < minDistSq:
-          minDistSq = distSq
-          nearestTreeX = treeX
-          nearestTreeZ = treeZ
-          foundEnd = true
-
-  if foundEnd:
-    # 3. Inicia a corrida do vulto
-    vultoStartPos = Vector3(x: bestTreeX, y: getTerrainHeight(bestTreeX, bestTreeZ), z: bestTreeZ)
-    vultoEndPos = Vector3(x: nearestTreeX, y: getTerrainHeight(nearestTreeX, nearestTreeZ), z: nearestTreeZ)
-    vultoPos = vultoStartPos
-    vultoProgress = 0.0'f32
-    
-    let pathDist = sqrt(minDistSq)
-    # Velocidade de corrida duplicada: 24.0 unidades por segundo
-    vultoSpeed = 24.0'f32 / pathDist
+  if found:
+    vultoTreeX = bestTreeX
+    vultoTreeZ = bestTreeZ
+    vultoPos = Vector3(x: bestTreeX, y: getTerrainHeight(bestTreeX, bestTreeZ), z: bestTreeZ)
+    vultoEmMovimento = false
+    vultoAtivo = true
+  else:
+    # Fallback seguro
+    vultoTreeX = camera.position.x + 120.0'f32
+    vultoTreeZ = camera.position.z + 50.0'f32
+    vultoPos = Vector3(x: vultoTreeX, y: getTerrainHeight(vultoTreeX, vultoTreeZ), z: vultoTreeZ)
+    vultoEmMovimento = false
     vultoAtivo = true
 
 # Inicialização do jogo
@@ -405,20 +489,30 @@ while not windowShouldClose() and not shouldExit:
   # Lógica do Vulto de Terror
   if gameState == StatePlaying:
     if not vultoAtivo:
-      vultoTimer -= dt
-      if vultoTimer <= 0.0'f32:
-        # Mira aproximada da câmera
-        let tDirX = sin(cameraAngleX) * cos(cameraAngleY)
-        let tDirY = sin(cameraAngleY)
-        let tDirZ = -cos(cameraAngleX) * cos(cameraAngleY)
-        dispararVultoDeTerror(camera, tDirX, tDirY, tDirZ)
-        # Próximo vulto em 5 segundos fixos
-        vultoTimer = 5.0'f32
+      inicializarVultoDeTerror(camera)
+    
+    if not vultoEmMovimento:
+      # Verifica a distância entre o jogador e a árvore do vulto
+      let dist = sqrt(
+        (vultoTreeX - camera.position.x) * (vultoTreeX - camera.position.x) +
+        (vultoTreeZ - camera.position.z) * (vultoTreeZ - camera.position.z)
+      )
+      
+      if dist < 90.0'f32:
+        # Se o jogador se aproximar demais, o vulto foge para mais longe
+        dispararVultoDeTerror(camera, moveAway = true)
+      elif dist > 180.0'f32:
+        # Se o jogador se afastar demais, o vulto o persegue para mais perto
+        dispararVultoDeTerror(camera, moveAway = false)
     else:
-      # Progresso da corrida do vulto
+      # Atualiza o movimento
       vultoProgress += dt * vultoSpeed
       if vultoProgress >= 1.0'f32:
-        vultoAtivo = false
+        vultoProgress = 1.0'f32
+        vultoEmMovimento = false
+        vultoTreeX = vultoEndPos.x
+        vultoTreeZ = vultoEndPos.z
+        vultoPos = vultoEndPos
       else:
         let t = vultoProgress
         let cx = vultoStartPos.x + (vultoEndPos.x - vultoStartPos.x) * t
@@ -703,6 +797,7 @@ while not windowShouldClose() and not shouldExit:
       if button(Rectangle(x: btnX, y: screenHeight/2 - 40, width: btnWidth, height: btnHeight), "Iniciar"):
         gameState = StatePlaying
         disableCursor()
+        inicializarVultoDeTerror(camera)
 
       if button(Rectangle(x: btnX, y: screenHeight/2 + 20, width: btnWidth, height: btnHeight), "Opcoes"):
         gameState = StateOptionsMenu
