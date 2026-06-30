@@ -1,11 +1,11 @@
 import os
 
---define:noSignalHandler
+# --define:noSignalHandler
 --define:danger
 --define:strip
---define:useMalloc
---panics:on
---boundChecks:off
+# --define:useMalloc
+# --panics:on
+# --boundChecks:off
 --opt:size
 
 const AndroidApiVersion {.intdefine.} = 33
