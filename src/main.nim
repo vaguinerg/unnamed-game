@@ -1,10 +1,16 @@
-import raylib, raymath, ./admob
+import raylib, raymath, raygui, ./admob
 import std/math
 import std/strformat
 
 when not defined(android):
   import std/os
   setCurrentDir getAppDir()
+
+type
+  GameState = enum
+    StateMainMenu,
+    StateOptionsMenu,
+    StatePlaying
 
 # Função de altura procedimental (combinação de senos/cossenos)
 proc getHeight(x, z: float32): float32 =
@@ -34,7 +40,7 @@ proc getColorForHeight(y: float32): Color =
     return Color(r: r, g: g, b: b, a: 255)
   elif y < 8.0'f32:
     let t = (y - 5.0'f32) / 3.0'f32
-    let r = uint8(130.0'f32 - t * 50.0'f32)
+    let r = uint8(130.0'f32 + t * 50.0'f32)
     let g = uint8(100.0'f32 - t * 20.0'f32)
     let b = uint8(70.0'f32 + t * 10.0'f32)
     return Color(r: r, g: g, b: b, a: 255)
@@ -97,14 +103,12 @@ proc getLightMultiplier(time: float32): float32 =
 # Inicialização do jogo
 setTraceLogLevel(None)
 setConfigFlags(flags(WindowResizable, Msaa4xHint, VsyncHint))
-initWindow(800, 600, "Cenário 3D - Terra Procedimental Infinita")
+initWindow(800, 600, "Dark Rogue")
 setTargetFPS(60)
-disableCursor()
+setExitKey(Null) # Impede que a tecla ESC feche a janela automaticamente
 
 # Configurações do jogador / câmera
 const
-  MouseSensitivity = 0.003'f32
-  MoveSpeed = 12.0'f32
   Gravity = 22.0'f32
   JumpForce = 8.5'f32
   EyeHeight = 1.8'f32
@@ -133,7 +137,13 @@ var
   flashlightOn = false       # Estado da lanterna
   flashlightBattery = 1.0'f32 # Bateria da lanterna (0.0 a 1.0)
 
-while not windowShouldClose():
+  # Configurações dinâmicas de menu
+  gameState = StateMainMenu
+  isFullscreenState = false
+  mouseSensitivity = 0.003'f32
+  shouldExit = false
+
+while not windowShouldClose() and not shouldExit:
   let dt = getFrameTime()
 
   # Progresso do tempo: 24 horas passam em 10 minutos (600 segundos)
@@ -142,88 +152,118 @@ while not windowShouldClose():
   if timeOfDay >= 24.0'f32:
     timeOfDay -= 24.0'f32
 
-  # Lógica de controle e bateria da Lanterna
-  if isKeyPressed(F):
-    # Só liga se tiver alguma bateria
-    if flashlightBattery > 0.0'f32 or not flashlightOn:
-      flashlightOn = not flashlightOn
+  # Lógica de estados do jogo
+  if gameState == StatePlaying:
+    # Retorna ao menu ao pressionar ESC (pausa)
+    if isKeyPressed(Escape):
+      gameState = StateMainMenu
+      enableCursor()
 
-  if flashlightOn:
-    # Consome a bateria em 10 segundos
-    flashlightBattery -= dt * 0.1'f32
-    if flashlightBattery <= 0.0'f32:
-      flashlightBattery = 0.0'f32
-      flashlightOn = false # Desliga automaticamente se zerar
-  else:
-    # Recarrega a bateria em 10 segundos quando desligada
-    if flashlightBattery < 1.0'f32:
-      flashlightBattery += dt * 0.1'f32
-      if flashlightBattery > 1.0'f32:
-        flashlightBattery = 1.0'f32
+    # Lógica de controle e bateria da Lanterna
+    if isKeyPressed(F):
+      if flashlightBattery > 0.0'f32 or not flashlightOn:
+        flashlightOn = not flashlightOn
 
-  # 1. Controle da Câmera (Mouse)
-  let mouseDelta = getMouseDelta()
-  cameraAngleX += mouseDelta.x * MouseSensitivity
-  cameraAngleY -= mouseDelta.y * MouseSensitivity
-  cameraAngleY = clamp(cameraAngleY, -1.5'f32, 1.5'f32)
+    if flashlightOn:
+      flashlightBattery -= dt * 0.1'f32
+      if flashlightBattery <= 0.0'f32:
+        flashlightBattery = 0.0'f32
+        flashlightOn = false
+    else:
+      if flashlightBattery < 1.0'f32:
+        flashlightBattery += dt * 0.1'f32
+        if flashlightBattery > 1.0'f32:
+          flashlightBattery = 1.0'f32
 
-  let forwardX = sin(cameraAngleX)
-  let forwardZ = -cos(cameraAngleX)
-  let rightX = cos(cameraAngleX)
-  let rightZ = sin(cameraAngleX)
+    # 1. Controle da Câmera (Mouse)
+    let mouseDelta = getMouseDelta()
+    cameraAngleX += mouseDelta.x * mouseSensitivity
+    cameraAngleY -= mouseDelta.y * mouseSensitivity
+    cameraAngleY = clamp(cameraAngleY, -1.5'f32, 1.5'f32)
 
-  # 2. Movimentação do Jogador (WASD)
-  var dx = 0.0'f32
-  var dz = 0.0'f32
+    let forwardX = sin(cameraAngleX)
+    let forwardZ = -cos(cameraAngleX)
+    let rightX = cos(cameraAngleX)
+    let rightZ = sin(cameraAngleX)
 
-  if isKeyDown(W):
-    dx += forwardX
-    dz += forwardZ
-  if isKeyDown(S):
-    dx -= forwardX
-    dz -= forwardZ
-  if isKeyDown(A):
-    dx -= rightX
-    dz -= rightZ
-  if isKeyDown(D):
-    dx += rightX
-    dz += rightZ
+    # 2. Movimentação do Jogador (WASD)
+    var dx = 0.0'f32
+    var dz = 0.0'f32
 
-  let len = sqrt(dx*dx + dz*dz)
-  if len > 0.001'f32:
-    camera.position.x += (dx / len) * MoveSpeed * dt
-    camera.position.z += (dz / len) * MoveSpeed * dt
+    if isKeyDown(W):
+      dx += forwardX
+      dz += forwardZ
+    if isKeyDown(S):
+      dx -= forwardX
+      dz -= forwardZ
+    if isKeyDown(A):
+      dx -= rightX
+      dz -= rightZ
+    if isKeyDown(D):
+      dx += rightX
+      dz += rightZ
 
-  # 3. Gravidade e Pulo sobre o Terreno
-  let groundHeight = getHeight(camera.position.x, camera.position.z)
+    let len = sqrt(dx*dx + dz*dz)
+    let moveSpeed = 12.0'f32
+    if len > 0.001'f32:
+      camera.position.x += (dx / len) * moveSpeed * dt
+      camera.position.z += (dz / len) * moveSpeed * dt
 
-  if not isGrounded:
-    velY -= Gravity * dt
-    camera.position.y += velY * dt
+    # 3. Gravidade e Pulo sobre o Terreno
+    let groundHeight = getHeight(camera.position.x, camera.position.z)
 
-    # Colisão com o terreno dinâmico (aterrissagem)
-    if camera.position.y <= groundHeight + EyeHeight:
+    if not isGrounded:
+      velY -= Gravity * dt
+      camera.position.y += velY * dt
+
+      # Colisão com o terreno dinâmico (aterrissagem)
+      if camera.position.y <= groundHeight + EyeHeight:
+        camera.position.y = groundHeight + EyeHeight
+        velY = 0.0'f32
+        isGrounded = true
+    else:
+      # Acompanha o relevo
       camera.position.y = groundHeight + EyeHeight
-      velY = 0.0'f32
-      isGrounded = true
-  else:
-    # Acompanha o relevo instantaneamente
-    camera.position.y = groundHeight + EyeHeight
-    
-    if isKeyPressed(Space):
-      velY = JumpForce
-      isGrounded = false
+      
+      if isKeyPressed(Space):
+        velY = JumpForce
+        isGrounded = false
 
-  # 4. Atualiza o alvo (target)
+    # Atualiza o alvo (target) baseado na mira
+    let targetDirX = sin(cameraAngleX) * cos(cameraAngleY)
+    let targetDirY = sin(cameraAngleY)
+    let targetDirZ = -cos(cameraAngleX) * cos(cameraAngleY)
+
+    camera.target.x = camera.position.x + targetDirX
+    camera.target.y = camera.position.y + targetDirY
+    camera.target.z = camera.position.z + targetDirZ
+
+  else:
+    # Se pressionar ESC no menu, fecha o jogo; nas opções, volta para o menu principal
+    if isKeyPressed(Escape):
+      if gameState == StateOptionsMenu:
+        gameState = StateMainMenu
+      else:
+        shouldExit = true
+
+    # Modo de Menu: a câmera orbita lentamente ao redor do centro do mundo
+    cameraAngleX += dt * 0.05'f32
+    cameraAngleY = -0.2'f32
+    
+    let menuCamRadius = 40.0'f32
+    camera.position.x = sin(cameraAngleX) * menuCamRadius
+    camera.position.z = cos(cameraAngleX) * menuCamRadius
+    camera.position.y = getHeight(camera.position.x, camera.position.z) + 10.0'f32
+    
+    # Mantém o alvo olhando para o centro da cena
+    camera.target = Vector3(x: 0.0'f32, y: getHeight(0.0'f32, 0.0'f32), z: 0.0'f32)
+
+  # Variáveis de mira usadas no cálculo da lanterna e culling
   let targetDirX = sin(cameraAngleX) * cos(cameraAngleY)
   let targetDirY = sin(cameraAngleY)
   let targetDirZ = -cos(cameraAngleX) * cos(cameraAngleY)
 
-  camera.target.x = camera.position.x + targetDirX
-  camera.target.y = camera.position.y + targetDirY
-  camera.target.z = camera.position.z + targetDirZ
-
-  # 5. Desenho do cenário
+  # 5. Desenho do cenário e interface
   drawing:
     let skyColor = getSkyColor(timeOfDay)
     let lightMult = getLightMultiplier(timeOfDay)
@@ -231,7 +271,7 @@ while not windowShouldClose():
     clearBackground(skyColor)
     
     mode3D(camera):
-      # Desenha a malha do terreno ao redor do jogador
+      # Desenha a malha do terreno ao redor do jogador ou centro do menu
       let gridCenterX = round(camera.position.x / Step) * Step
       let gridCenterZ = round(camera.position.z / Step) * Step
       let halfCells = int(ViewDistance / Step)
@@ -268,10 +308,8 @@ while not windowShouldClose():
             let normY = toCellY / dist
             let normZ = toCellZ / dist
             
-            # Produto escalar entre a direção do bloco e a mira da câmera
             let cosSpot = normX * targetDirX + normY * targetDirY + normZ * targetDirZ
             if cosSpot > FlashlightConeCos:
-              # Atenuação por ângulo (suave nas bordas do cone) e por distância
               let angleFactor = (cosSpot - FlashlightConeCos) / (1.0'f32 - FlashlightConeCos)
               let distFactor = 1.0'f32 - (dist / FlashlightRange)
               cellFlashlight = angleFactor * distFactor * FlashlightIntensity
@@ -290,7 +328,6 @@ while not windowShouldClose():
           let baseC1 = getColorForHeight((y00 + y10 + y01) / 3.0'f32)
           let baseC2 = getColorForHeight((y10 + y11 + y01) / 3.0'f32)
           
-          # Luz total é a soma da luz ambiente do dia com a lanterna
           let totalLight1 = clamp(lightMult + cellFlashlight, 0.0'f32, 2.0'f32)
           let totalLight2 = clamp(lightMult + cellFlashlight, 0.0'f32, 2.0'f32)
           
@@ -310,44 +347,79 @@ while not windowShouldClose():
           drawTriangle3D(v00, v01, v10, c1)
           drawTriangle3D(v10, v01, v11, c2)
 
-    # Interface 2D: Exibe a hora formatada no canto superior direito
-    let hours = int(timeOfDay)
-    let minutes = int((timeOfDay - float32(hours)) * 60.0'f32)
-    let timeStr = fmt"{hours:02}:{minutes:02}"
-    
-    let screenWidth = getScreenWidth()
-    let text = timeStr
-    let fontSize = 24.int32
-    let textWidth = measureText(text, fontSize)
-    let posX = screenWidth - textWidth - 20
-    let posY = 20.int32
-    
-    # Caixinha preta translúcida de fundo para a hora
-    drawRectangle(posX - 10, posY - 5, textWidth + 20, fontSize + 10, Color(r: 0, g: 0, b: 0, a: 150))
-    drawText(text, posX, posY, fontSize, RayWhite)
+    # UI 2D do Jogo
+    let screenWidth = getScreenWidth().float32
+    let screenHeight = getScreenHeight().float32
 
-    # UI da Lanterna (Bateria) - exibida apenas se a carga for menor que 100%
-    if flashlightBattery < 1.0'f32:
-      let batteryPct = int(flashlightBattery * 100.0'f32)
-      let batteryStr = fmt"{batteryPct}%"
+    if gameState == StateMainMenu:
+      # --- MENU PRINCIPAL ---
+      let title = "DARK ROGUE"
+      let titleFontSize = 40.int32
+      let titleWidth = measureText(title, titleFontSize).float32
+      drawText(title, int32(screenWidth/2 - titleWidth/2), int32(screenHeight/2 - 150), titleFontSize, RayWhite)
+
+      let btnWidth = 220.float32
+      let btnHeight = 40.float32
+      let btnX = screenWidth/2 - btnWidth/2
+
+      if button(Rectangle(x: btnX, y: screenHeight/2 - 40, width: btnWidth, height: btnHeight), "Iniciar"):
+        gameState = StatePlaying
+        disableCursor()
+
+      if button(Rectangle(x: btnX, y: screenHeight/2 + 20, width: btnWidth, height: btnHeight), "Opcoes"):
+        gameState = StateOptionsMenu
+
+      if button(Rectangle(x: btnX, y: screenHeight/2 + 80, width: btnWidth, height: btnHeight), "Sair"):
+        shouldExit = true
+
+    elif gameState == StateOptionsMenu:
+      # --- MENU DE OPÇÕES ---
+      let title = "OPCOES"
+      let titleFontSize = 40.int32
+      let titleWidth = measureText(title, titleFontSize).float32
+      drawText(title, int32(screenWidth/2 - titleWidth/2), int32(screenHeight/2 - 150), titleFontSize, RayWhite)
+
+      let optWidth = 220.float32
+      let optHeight = 30.float32
+      let optX = screenWidth/2 - optWidth/2
+
+      # Checkbox de Tela Cheia
+      if checkBox(Rectangle(x: optX, y: screenHeight/2 - 40, width: 20, height: 20), "Tela Cheia", isFullscreenState):
+        toggleFullscreen()
+
+      # Slider de Sensibilidade
+      var sensValue = mouseSensitivity * 1000.0'f32
+      if slider(Rectangle(x: optX, y: screenHeight/2, width: 150, height: 20), "Sensibilidade: ", fmt"{sensValue:.1f}", sensValue, 1.0'f32, 10.0'f32):
+        mouseSensitivity = sensValue / 1000.0'f32
+
+      # Botão Voltar
+      if button(Rectangle(x: optX, y: screenHeight/2 + 60, width: optWidth, height: 40), "Voltar"):
+        gameState = StateMainMenu
+
+    else:
+      # --- JOGO ATIVO ---
+      # Relógio superior direito
+      let hours = int(timeOfDay)
+      let minutes = int((timeOfDay - float32(hours)) * 60.0'f32)
+      let timeStr = fmt"{hours:02}:{minutes:02}"
       
-      # Define a cor do texto com base na carga restante
-      var batteryColor = Green
-      if batteryPct < 20:
-        batteryColor = Red
-      elif batteryPct < 50:
-        batteryColor = Gold # Amarelo/Dourado
+      let text = timeStr
+      let fontSize = 24.int32
+      let textWidth = measureText(text, fontSize)
+      let posX = screenWidth - textWidth.float32 - 20
+      let posY = 20.float32
+      
+      drawRectangle(int32(posX - 10), int32(posY - 5), textWidth + 20, fontSize + 10, Color(r: 0, g: 0, b: 0, a: 150))
+      drawText(text, int32(posX), int32(posY), fontSize, RayWhite)
+
+      # UI da Lanterna (ProgressBar do RayGui) - exibida se a carga for menor que 100%
+      if flashlightBattery < 1.0'f32:
+        let pbWidth = 150.float32
+        let pbHeight = 20.float32
+        let pbX = screenWidth - pbWidth - 20
+        let pbY = 65.float32
         
-      let bText = batteryStr
-      let bFontSize = 20.int32
-      let bTextWidth = measureText(bText, bFontSize)
-      
-      # Desenha logo abaixo do relógio (y = 60)
-      let bPosX = screenWidth - bTextWidth - 20
-      let bPosY = 65.int32
-      
-      # Caixinha preta translúcida de fundo para a bateria
-      drawRectangle(bPosX - 10, bPosY - 5, bTextWidth + 20, bFontSize + 10, Color(r: 0, g: 0, b: 0, a: 150))
-      drawText(bText, bPosX, bPosY, bFontSize, batteryColor)
+        # ProgressBar do RayGui (passamos a bateria como var float32)
+        progressBar(Rectangle(x: pbX, y: pbY, width: pbWidth, height: pbHeight), "Bateria: ", "", flashlightBattery, 0.0'f32, 1.0'f32)
 
 closeWindow()
