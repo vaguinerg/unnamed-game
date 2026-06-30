@@ -1,5 +1,6 @@
 import raylib, raymath, ./admob
 import std/math
+import std/strformat
 
 when not defined(android):
   import std/os
@@ -15,7 +16,7 @@ proc getHeight(x, z: float32): float32 =
   h += cos(x * 0.15'f32) * cos(z * 0.15'f32) * 0.8'f32
   return h
 
-# Função para obter a cor com base na altura (gradiente suave)
+# Função para obter a cor base com base na altura (gradiente suave)
 proc getColorForHeight(y: float32): Color =
   if y < -3.0'f32:
     return Color(r: 35, g: 90, b: 35, a: 255) # Verde escuro (vales)
@@ -44,6 +45,55 @@ proc getColorForHeight(y: float32): Color =
     let b = uint8(80.0'f32 + t * 165.0'f32)
     return Color(r: r, g: g, b: b, a: 255)
 
+# Interpolação linear de cores para o céu
+proc lerpColor(c1, c2: Color, t: float32): Color =
+  let r = uint8(float32(c1.r) + (float32(c2.r) - float32(c1.r)) * t)
+  let g = uint8(float32(c1.g) + (float32(c2.g) - float32(c1.g)) * t)
+  let b = uint8(float32(c1.b) + (float32(c2.b) - float32(c1.b)) * t)
+  return Color(r: r, g: g, b: b, a: 255)
+
+# Cor do céu baseada na hora do dia (0.0 a 24.0)
+proc getSkyColor(time: float32): Color =
+  if time < 5.0'f32:
+    let t = time / 5.0'f32
+    return lerpColor(Color(r: 5, g: 5, b: 20, a: 255), Color(r: 20, g: 15, b: 40, a: 255), t)
+  elif time < 6.5'f32:
+    let t = (time - 5.0'f32) / 1.5'f32
+    return lerpColor(Color(r: 20, g: 15, b: 40, a: 255), Color(r: 230, g: 120, b: 80, a: 255), t)
+  elif time < 8.0'f32:
+    let t = (time - 6.5'f32) / 1.5'f32
+    return lerpColor(Color(r: 230, g: 120, b: 80, a: 255), Color(r: 100, g: 180, b: 240, a: 255), t)
+  elif time < 16.0'f32:
+    let t = (time - 8.0'f32) / 8.0'f32
+    return lerpColor(Color(r: 100, g: 180, b: 240, a: 255), Color(r: 135, g: 206, b: 250, a: 255), t)
+  elif time < 18.0'f32:
+    let t = (time - 16.0'f32) / 2.0'f32
+    return lerpColor(Color(r: 135, g: 206, b: 250, a: 255), Color(r: 220, g: 140, b: 70, a: 255), t)
+  elif time < 19.5'f32:
+    let t = (time - 18.0'f32) / 1.5'f32
+    return lerpColor(Color(r: 220, g: 140, b: 70, a: 255), Color(r: 120, g: 50, b: 100, a: 255), t)
+  elif time < 21.0'f32:
+    let t = (time - 19.5'f32) / 1.5'f32
+    return lerpColor(Color(r: 120, g: 50, b: 100, a: 255), Color(r: 25, g: 25, b: 60, a: 255), t)
+  else:
+    let t = (time - 21.0'f32) / 3.0'f32
+    return lerpColor(Color(r: 25, g: 25, b: 60, a: 255), Color(r: 5, g: 5, b: 20, a: 255), t)
+
+# Multiplicador de iluminação do terreno baseada na hora do dia (0.15 a 1.0)
+proc getLightMultiplier(time: float32): float32 =
+  if time >= 7.0'f32 and time <= 17.0'f32:
+    return 1.0'f32
+  elif time < 4.0'f32 or time > 20.0'f32:
+    return 0.15'f32 # Noite escura, mas visível
+  elif time >= 4.0'f32 and time < 7.0'f32:
+    # Amanhecer
+    let t = (time - 4.0'f32) / 3.0'f32
+    return 0.15'f32 + t * 0.85'f32
+  else:
+    # Anoitecer
+    let t = (time - 17.0'f32) / 3.0'f32
+    return 1.0'f32 - t * 0.85'f32
+
 # Inicialização do jogo
 setTraceLogLevel(None)
 setConfigFlags(flags(WindowResizable, Msaa4xHint, VsyncHint))
@@ -54,12 +104,12 @@ disableCursor()
 # Configurações do jogador / câmera
 const
   MouseSensitivity = 0.003'f32
-  MoveSpeed = 12.0'f32 # Velocidade para explorar melhor o terreno infinito
+  MoveSpeed = 12.0'f32
   Gravity = 22.0'f32
   JumpForce = 8.5'f32
   EyeHeight = 1.8'f32
-  ViewDistance = 400.0'f32 # Aumentado em 4x
-  Step = 5.0'f32 # Aumentado para otimização em longa distância
+  ViewDistance = 400.0'f32
+  Step = 5.0'f32
 
 let startHeight = getHeight(0.0'f32, 0.0'f32)
 var
@@ -74,9 +124,16 @@ var
   cameraAngleY = 0.0'f32
   velY = 0.0'f32
   isGrounded = true
+  timeOfDay = 12.0'f32 # Começa ao meio-dia
 
 while not windowShouldClose():
   let dt = getFrameTime()
+
+  # Progresso do tempo: 24 horas passam em 10 minutos (600 segundos)
+  # Taxa: 24.0 / 600.0 = 0.04 horas de jogo por segundo real
+  timeOfDay += dt * 0.04'f32
+  if timeOfDay >= 24.0'f32:
+    timeOfDay -= 24.0'f32
 
   # 1. Controle da Câmera (Mouse)
   let mouseDelta = getMouseDelta()
@@ -124,7 +181,7 @@ while not windowShouldClose():
       velY = 0.0'f32
       isGrounded = true
   else:
-    # Se está no chão, acompanha o relevo instantaneamente (subidas e descidas)
+    # Acompanha o relevo instantaneamente
     camera.position.y = groundHeight + EyeHeight
     
     if isKeyPressed(Space):
@@ -142,7 +199,10 @@ while not windowShouldClose():
 
   # 5. Desenho do cenário
   drawing:
-    clearBackground(SkyBlue)
+    let skyColor = getSkyColor(timeOfDay)
+    let lightMult = getLightMultiplier(timeOfDay)
+    
+    clearBackground(skyColor)
     
     mode3D(camera):
       # Desenha a malha do terreno ao redor do jogador
@@ -171,7 +231,6 @@ while not windowShouldClose():
           if distSq > 15.0'f32 * 15.0'f32:
             let dist = sqrt(distSq)
             let cosAngle = (toCellX * targetDirX + toCellY * targetDirY + toCellZ * targetDirZ) / dist
-            # Culling: Se o ângulo for maior que 60 graus (cos < 0.5), descarta a célula
             if cosAngle < 0.5'f32:
               continue
           
@@ -185,18 +244,40 @@ while not windowShouldClose():
           let v01 = Vector3(x: x0, y: y01, z: z1)
           let v11 = Vector3(x: x1, y: y11, z: z1)
           
-          # Cores baseadas na altura média de cada triângulo
-          let c1 = getColorForHeight((y00 + y10 + y01) / 3.0'f32)
-          let c2 = getColorForHeight((y10 + y11 + y01) / 3.0'f32)
+          # Cores baseadas na altura média de cada triângulo e atenuadas pela luz do dia
+          let baseC1 = getColorForHeight((y00 + y10 + y01) / 3.0'f32)
+          let baseC2 = getColorForHeight((y10 + y11 + y01) / 3.0'f32)
+          
+          let c1 = Color(
+            r: uint8(float32(baseC1.r) * lightMult),
+            g: uint8(float32(baseC1.g) * lightMult),
+            b: uint8(float32(baseC1.b) * lightMult),
+            a: 255
+          )
+          let c2 = Color(
+            r: uint8(float32(baseC2.r) * lightMult),
+            g: uint8(float32(baseC2.g) * lightMult),
+            b: uint8(float32(baseC2.b) * lightMult),
+            a: 255
+          )
           
           drawTriangle3D(v00, v01, v10, c1)
           drawTriangle3D(v10, v01, v11, c2)
 
-    # Interface 2D
-    drawText("Terreno Procedimental Infinito", 10, 10, 20, DarkGray)
-    drawText("Posicao X: " & $round(camera.position.x) & " Z: " & $round(camera.position.z), 10, 35, 18, Gray)
-    drawText("- WASD para caminhar", 10, 60, 18, Gray)
-    drawText("- Mouse para olhar", 10, 80, 18, Gray)
-    drawText("- ESPACO para pular", 10, 100, 18, Gray)
+    # Interface 2D: Exibe a hora formatada no canto superior direito
+    let hours = int(timeOfDay)
+    let minutes = int((timeOfDay - float32(hours)) * 60.0'f32)
+    let timeStr = fmt"{hours:02}:{minutes:02}"
+    
+    let screenWidth = getScreenWidth()
+    let text = timeStr
+    let fontSize = 24.int32
+    let textWidth = measureText(text, fontSize)
+    let posX = screenWidth - textWidth - 20
+    let posY = 20.int32
+    
+    # Caixinha preta translúcida de fundo para legibilidade
+    drawRectangle(posX - 10, posY - 5, textWidth + 20, fontSize + 10, Color(r: 0, g: 0, b: 0, a: 150))
+    drawText(text, posX, posY, fontSize, RayWhite)
 
 closeWindow()
