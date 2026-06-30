@@ -111,6 +111,11 @@ const
   ViewDistance = 400.0'f32
   Step = 5.0'f32
 
+  # Parâmetros da Lanterna
+  FlashlightRange = 75.0'f32
+  FlashlightConeCos = 0.96'f32  # Abertura do cone da lanterna (~16 graus)
+  FlashlightIntensity = 1.5'f32 # Intensidade máxima do brilho da lanterna
+
 let startHeight = getHeight(0.0'f32, 0.0'f32)
 var
   camera = Camera(
@@ -124,7 +129,9 @@ var
   cameraAngleY = 0.0'f32
   velY = 0.0'f32
   isGrounded = true
-  timeOfDay = 12.0'f32 # Começa ao meio-dia
+  timeOfDay = 12.0'f32       # Começa ao meio-dia
+  flashlightOn = false       # Estado da lanterna
+  flashlightBattery = 1.0'f32 # Bateria da lanterna (0.0 a 1.0)
 
 while not windowShouldClose():
   let dt = getFrameTime()
@@ -134,6 +141,25 @@ while not windowShouldClose():
   timeOfDay += dt * 0.04'f32
   if timeOfDay >= 24.0'f32:
     timeOfDay -= 24.0'f32
+
+  # Lógica de controle e bateria da Lanterna
+  if isKeyPressed(F):
+    # Só liga se tiver alguma bateria
+    if flashlightBattery > 0.0'f32 or not flashlightOn:
+      flashlightOn = not flashlightOn
+
+  if flashlightOn:
+    # Consome a bateria em 10 segundos
+    flashlightBattery -= dt * 0.1'f32
+    if flashlightBattery <= 0.0'f32:
+      flashlightBattery = 0.0'f32
+      flashlightOn = false # Desliga automaticamente se zerar
+  else:
+    # Recarrega a bateria em 10 segundos quando desligada
+    if flashlightBattery < 1.0'f32:
+      flashlightBattery += dt * 0.1'f32
+      if flashlightBattery > 1.0'f32:
+        flashlightBattery = 1.0'f32
 
   # 1. Controle da Câmera (Mouse)
   let mouseDelta = getMouseDelta()
@@ -233,6 +259,22 @@ while not windowShouldClose():
             let cosAngle = (toCellX * targetDirX + toCellY * targetDirY + toCellZ * targetDirZ) / dist
             if cosAngle < 0.5'f32:
               continue
+
+          # --- Cálculo do SpotLight da Lanterna ---
+          var cellFlashlight = 0.0'f32
+          if flashlightOn and distSq < FlashlightRange * FlashlightRange:
+            let dist = sqrt(distSq)
+            let normX = toCellX / dist
+            let normY = toCellY / dist
+            let normZ = toCellZ / dist
+            
+            # Produto escalar entre a direção do bloco e a mira da câmera
+            let cosSpot = normX * targetDirX + normY * targetDirY + normZ * targetDirZ
+            if cosSpot > FlashlightConeCos:
+              # Atenuação por ângulo (suave nas bordas do cone) e por distância
+              let angleFactor = (cosSpot - FlashlightConeCos) / (1.0'f32 - FlashlightConeCos)
+              let distFactor = 1.0'f32 - (dist / FlashlightRange)
+              cellFlashlight = angleFactor * distFactor * FlashlightIntensity
           
           let y00 = getHeight(x0, z0)
           let y10 = getHeight(x1, z0)
@@ -244,20 +286,24 @@ while not windowShouldClose():
           let v01 = Vector3(x: x0, y: y01, z: z1)
           let v11 = Vector3(x: x1, y: y11, z: z1)
           
-          # Cores baseadas na altura média de cada triângulo e atenuadas pela luz do dia
+          # Cores baseadas na altura média de cada triângulo e atenuadas pela luz do dia + lanterna
           let baseC1 = getColorForHeight((y00 + y10 + y01) / 3.0'f32)
           let baseC2 = getColorForHeight((y10 + y11 + y01) / 3.0'f32)
           
+          # Luz total é a soma da luz ambiente do dia com a lanterna
+          let totalLight1 = clamp(lightMult + cellFlashlight, 0.0'f32, 2.0'f32)
+          let totalLight2 = clamp(lightMult + cellFlashlight, 0.0'f32, 2.0'f32)
+          
           let c1 = Color(
-            r: uint8(float32(baseC1.r) * lightMult),
-            g: uint8(float32(baseC1.g) * lightMult),
-            b: uint8(float32(baseC1.b) * lightMult),
+            r: uint8(min(float32(baseC1.r) * totalLight1, 255.0'f32)),
+            g: uint8(min(float32(baseC1.g) * totalLight1, 255.0'f32)),
+            b: uint8(min(float32(baseC1.b) * totalLight1, 255.0'f32)),
             a: 255
           )
           let c2 = Color(
-            r: uint8(float32(baseC2.r) * lightMult),
-            g: uint8(float32(baseC2.g) * lightMult),
-            b: uint8(float32(baseC2.b) * lightMult),
+            r: uint8(min(float32(baseC2.r) * totalLight2, 255.0'f32)),
+            g: uint8(min(float32(baseC2.g) * totalLight2, 255.0'f32)),
+            b: uint8(min(float32(baseC2.b) * totalLight2, 255.0'f32)),
             a: 255
           )
           
@@ -276,8 +322,32 @@ while not windowShouldClose():
     let posX = screenWidth - textWidth - 20
     let posY = 20.int32
     
-    # Caixinha preta translúcida de fundo para legibilidade
+    # Caixinha preta translúcida de fundo para a hora
     drawRectangle(posX - 10, posY - 5, textWidth + 20, fontSize + 10, Color(r: 0, g: 0, b: 0, a: 150))
     drawText(text, posX, posY, fontSize, RayWhite)
+
+    # UI da Lanterna (Bateria) - exibida apenas se a carga for menor que 100%
+    if flashlightBattery < 1.0'f32:
+      let batteryPct = int(flashlightBattery * 100.0'f32)
+      let batteryStr = fmt"{batteryPct}%"
+      
+      # Define a cor do texto com base na carga restante
+      var batteryColor = Green
+      if batteryPct < 20:
+        batteryColor = Red
+      elif batteryPct < 50:
+        batteryColor = Gold # Amarelo/Dourado
+        
+      let bText = batteryStr
+      let bFontSize = 20.int32
+      let bTextWidth = measureText(bText, bFontSize)
+      
+      # Desenha logo abaixo do relógio (y = 60)
+      let bPosX = screenWidth - bTextWidth - 20
+      let bPosY = 65.int32
+      
+      # Caixinha preta translúcida de fundo para a bateria
+      drawRectangle(bPosX - 10, bPosY - 5, bTextWidth + 20, bFontSize + 10, Color(r: 0, g: 0, b: 0, a: 150))
+      drawText(bText, bPosX, bPosY, bFontSize, batteryColor)
 
 closeWindow()
