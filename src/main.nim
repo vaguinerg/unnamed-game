@@ -346,8 +346,8 @@ proc dispararVultoDeTerror(camera: Camera, targetDirX, targetDirY, targetDirZ: f
     vultoProgress = 0.0'f32
     
     let pathDist = sqrt(minDistSq)
-    # Velocidade de corrida: 12.0 unidades por segundo (mais visível e natural)
-    vultoSpeed = 12.0'f32 / pathDist
+    # Velocidade de corrida duplicada: 24.0 unidades por segundo
+    vultoSpeed = 24.0'f32 / pathDist
     vultoAtivo = true
 
 # Inicialização do jogo
