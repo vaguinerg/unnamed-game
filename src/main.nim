@@ -136,6 +136,7 @@ var
   timeOfDay = 12.0'f32       # Começa ao meio-dia
   flashlightOn = false       # Estado da lanterna
   flashlightBattery = 1.0'f32 # Bateria da lanterna (0.0 a 1.0)
+  stamina = 1.0'f32           # Energia para correr (0.0 a 1.0)
 
   # Configurações dinâmicas de menu
   gameState = StateMainMenu
@@ -204,8 +205,21 @@ while not windowShouldClose() and not shouldExit:
       dz += rightZ
 
     let len = sqrt(dx*dx + dz*dz)
-    let moveSpeed = 12.0'f32
-    if len > 0.001'f32:
+    let isMoving = len > 0.001'f32
+    let wantSprint = isKeyDown(LeftShift) or isKeyDown(RightShift)
+    let canSprint = wantSprint and isMoving and stamina > 0.0'f32
+    
+    let moveSpeed = if canSprint: 16.0'f32 else: 8.0'f32
+    
+    if canSprint:
+      stamina -= dt * 0.2'f32 # Consome tudo em 5 segundos
+      if stamina < 0.0'f32: stamina = 0.0'f32
+    else:
+      if stamina < 1.0'f32:
+        stamina += dt * 0.2'f32 # Recarrega tudo em 5 segundos
+        if stamina > 1.0'f32: stamina = 1.0'f32
+
+    if isMoving:
       camera.position.x += (dx / len) * moveSpeed * dt
       camera.position.z += (dz / len) * moveSpeed * dt
 
@@ -397,29 +411,42 @@ while not windowShouldClose() and not shouldExit:
         gameState = StateMainMenu
 
     else:
-      # --- JOGO ATIVO ---
-      # Relógio superior direito
+      # --- JOGO ATIVO (UI UNIFICADA DE STATUS) ---
       let hours = int(timeOfDay)
       let minutes = int((timeOfDay - float32(hours)) * 60.0'f32)
       let timeStr = fmt"{hours:02}:{minutes:02}"
       
-      let text = timeStr
-      let fontSize = 24.int32
-      let textWidth = measureText(text, fontSize)
-      let posX = screenWidth - textWidth.float32 - 20
-      let posY = 20.float32
+      let hasFlashlight = flashlightBattery < 1.0'f32
+      let hasStamina = stamina < 1.0'f32
       
-      drawRectangle(int32(posX - 10), int32(posY - 5), textWidth + 20, fontSize + 10, Color(r: 0, g: 0, b: 0, a: 150))
-      drawText(text, int32(posX), int32(posY), fontSize, RayWhite)
-
-      # UI da Lanterna (ProgressBar do RayGui) - exibida se a carga for menor que 100%
-      if flashlightBattery < 1.0'f32:
-        let pbWidth = 150.float32
-        let pbHeight = 20.float32
-        let pbX = screenWidth - pbWidth - 20
-        let pbY = 65.float32
+      # Largura e posições
+      let panelWidth = 240.float32
+      let panelX = screenWidth - panelWidth - 20.float32
+      let panelY = 20.float32
+      
+      # Altura dinâmica baseada na visibilidade dos elementos
+      var panelHeight = 40.float32 # Apenas para o relógio
+      if hasFlashlight: panelHeight += 30.float32
+      if hasStamina: panelHeight += 30.float32
+      
+      # 1. Desenha o Painel de Status unificado do RayGui
+      panel(Rectangle(x: panelX, y: panelY, width: panelWidth, height: panelHeight), "")
+      
+      # 2. Desenha o Relógio (usando o Label do RayGui)
+      label(Rectangle(x: panelX + 15.float32, y: panelY + 10.float32, width: panelWidth - 30.float32, height: 20.float32), "Hora: " & timeStr)
+      
+      # 3. Desenha as barras de progresso (Lanterna e Energia) dentro do painel
+      var elementY = panelY + 40.float32
+      let pbWidth = 140.float32
+      let pbHeight = 16.float32
+      let pbX = panelX + 85.float32 # Dá espaço de 70px para o texto da label à esquerda
+      
+      if hasFlashlight:
+        progressBar(Rectangle(x: pbX, y: elementY, width: pbWidth, height: pbHeight), "Lanterna", "", flashlightBattery, 0.0'f32, 1.0'f32)
+        elementY += 30.float32
         
-        # ProgressBar do RayGui (passamos a bateria como var float32)
-        progressBar(Rectangle(x: pbX, y: pbY, width: pbWidth, height: pbHeight), "Bateria: ", "", flashlightBattery, 0.0'f32, 1.0'f32)
+      if hasStamina:
+        progressBar(Rectangle(x: pbX, y: elementY, width: pbWidth, height: pbHeight), "Energia", "", stamina, 0.0'f32, 1.0'f32)
+        elementY += 30.float32
 
 closeWindow()
