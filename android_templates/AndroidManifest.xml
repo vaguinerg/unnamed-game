@@ -10,7 +10,7 @@
         <activity android:name=".NativeLoader"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:configChanges="orientation|keyboard|keyboardHidden|screenSize"
-            android:screenOrientation="portrait" android:launchMode="singleTask"
+            android:screenOrientation="landscape" android:launchMode="singleTask"
             android:clearTaskOnLaunch="true"
             android:exported="true">
             <meta-data android:name="android.app.lib_name" android:value="main" />
