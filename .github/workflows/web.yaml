@@ -1,0 +1,64 @@
+name: Build Web Version
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build-web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: 'stable'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y xorg-dev libgl1-mesa-dev freeglut3-dev
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+
+      - name: Compile to Web (WASM)
+        run: |
+          OLDPWD="$PWD"
+          cd "$(mktemp -d)"
+          nimble install naylib nimja spacy https://github.com/planetis-m/naygui -y
+          cd "$OLDPWD"
+          
+          nim c -f -d:danger --opt:size -d:emscripten --passC:"-msimd128 -O3 -mavx" src/main.nim
+            
+      - name: Upload Web Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dark_Rogue-web
+          path: web
+          compression-level: 9
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload to Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

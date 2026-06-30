@@ -1,0 +1,174 @@
+name: Compile Binaries
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: 'stable'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: master
+    
+      - name: Install Nim deps
+        run: |
+          OLDPWD="$PWD"
+          cd "$(mktemp -d)"
+          nimble install naylib nimja spacy https://github.com/planetis-m/naygui zigcc -y
+          cd "$OLDPWD"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xorg-dev libgl1-mesa-dev freeglut3-dev zip upx \
+            libwayland-dev libasound2-dev libx11-dev libxrandr-dev \
+            libxi-dev libglu1-mesa-dev libxcursor-dev libxinerama-dev \
+            libxkbcommon-dev gcc musl musl-tools clang gcc-multilib libwayland-dev
+          
+      - name: Compile linux x64 x11
+        run: |
+          nim c -f --cc:clang --passC:"-march=native -Ofast -flto" --passL:"-flto" --clang.exe="zigcc" --clang.linkerexe="zigcc" -o:src/bin/dark_rogue src/main.nim
+          upx --best --ultra-brute ./src/bin/*
+          
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dark_rogue-x86_64-linux-gnu-x11
+          path: src/bin/dark_rogue
+          compression-level: 9
+
+      - name: Compile linux x64 wayland
+        run: |
+          nim c -f -d:wayland --cc:clang --passC:"-march=native -Ofast -flto" --passL:"-flto" --clang.exe="zigcc" --clang.linkerexe="zigcc" -o:src/bin/dark_rogue src/main.nim
+          upx --best --ultra-brute ./src/bin/*
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dark_rogue-x86_64-linux-gnu-wayland
+          path: src/bin/dark_rogue
+          compression-level: 9
+
+  build-macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: 'stable'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Nim deps
+        run: |
+          OLDPWD="$PWD"
+          cd "$(mktemp -d)"
+          nimble install naylib nimja spacy https://github.com/planetis-m/naygui -y
+          cd "$OLDPWD"
+
+      - name: Build macOS binary
+        run: nim c -d:GraphicsApiOpenGlEs2 --passC:"-Ofast -flto -march=native" --passL:"-flto"  -o:src/bin/dark_rogue src/main.nim
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dark_rogue-unknown-mac-gnu-cocoa
+          path: src/bin/*
+
+  build-apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: 'stable'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Java
+        uses: actions/setup-java@v1
+        with:
+          java-version: 24
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+          add-to-path: true
+
+      - name: Build APK
+        run: |
+          OLDPWD="$PWD"
+          cd "$(mktemp -d)"
+          nimble install naylib nimja spacy https://github.com/planetis-m/naygui -y
+          cd "$OLDPWD"
+      
+          nimble setupAndroid
+          nimble buildAndroid
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dark_Rogue-android-debug
+          path: ./*.apk
+          compression-level: 9
+          
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    name: Windows x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: 'stable'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: master
+          
+      - name: Install Nim deps
+        run: |
+          OLDPWD="$PWD"
+          cd "$(mktemp -d)"
+          nimble install naylib nimja spacy https://github.com/planetis-m/naygui zigcc -y
+          cd "$OLDPWD"
+
+      - name: Build Windows binary
+        run: |
+          nim c -d:GraphicsApiOpenGl11 --passC:"-Ofast -flto -march=native" --passL:"-flto" --clang.exe="zigcc" --clang.linkerexe="zigcc" -o:src/bin/dark-rogue src/main.nim
+          choco install upx
+          upx --best --ultra-brute src/bin/*
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dark_rogue-x86_64-windows-gnu-gdi32
+          path: src/bin/*
