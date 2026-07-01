@@ -12,29 +12,40 @@ type
     StateOptionsMenu,
     StatePlaying
 
-  VultoState = enum
-    VultoIdle,
-    VultoMoving,
-    VultoCountdown,
-    VultoJumpscare,
-    VultoGameOver
-
 # --- Variáveis Globais do Vulto de Terror ---
 var
+  gameRandState: uint32 = 987654
   vultoAtivo: bool = false
-  vultoEmMovimento: bool = false
-  vultoTreeX: float32 = 0.0'f32
-  vultoTreeZ: float32 = 0.0'f32
   vultoPos: Vector3
   vultoStartPos: Vector3
   vultoEndPos: Vector3
   vultoProgress: float32 = 0.0'f32
   vultoSpeed: float32 = 0.0'f32
-  vultoState: VultoState = VultoIdle
-  gameOverTimer: float32 = 10.0'f32
-  vultoCooldownTimer: float32 = 0.0'f32
-  vultoTargetPercent: float32 = 0.50'f32 # Começa em 50% de distância
-  vultoSpottedDuringMove: bool = false
+  vultoTimer: float32 = 5.0'f32
+
+  # Temporizadores e estados de terror
+  vultoLookTimer: float32 = 15.0'f32         # Tempo máximo sem ver o vulto (15 segundos)
+  vultoContagemRegressiva: float32 = 10.0'f32 # Contagem regressiva (10 segundos)
+  vultoEmAlerta: bool = false                # Se está na contagem regressiva
+  isGameOver: bool = false                   # Se o jogador perdeu
+
+proc gameRand(): float32 =
+  gameRandState = gameRandState * 1664525 + 1013904223
+  return float32(gameRandState and 0xFFFFFF) / 16777216.0'f32
+
+# --- Gerador Aleatório Determinístico para Células (PRNG) ---
+type
+  CellRand = object
+    state: uint32
+
+proc initRand(x, z: int): CellRand =
+  var s = uint32((x * 73856093) xor (z * 19349663))
+  if s == 0: s = 1
+  return CellRand(state: s)
+
+proc nextFloat(r: var CellRand): float32 =
+  r.state = r.state * 1664525 + 1013904223
+  return float32(r.state and 0xFFFFFF) / 16777216.0'f32
 
 const Step = 5.0'f32
 
@@ -49,6 +60,7 @@ proc getHeight(x, z: float32): float32 =
   return h
 
 # Função para obter a altura exata da malha triangular do terreno na coordenada (x, z)
+# Isso evita que o jogador, câmera e árvores flutuem ou afundem nas colinas
 proc getTerrainHeight(x, z: float32): float32 =
   let x0 = floor(x / Step) * Step
   let z0 = floor(z / Step) * Step
@@ -148,26 +160,12 @@ proc getLightMultiplier(time: float32): float32 =
     let t = (time - 17.0'f32) / 3.0'f32
     return 1.0'f32 - t * 0.85'f32
 
-# --- Gerador Aleatório Determinístico para Células (PRNG) ---
-type
-  CellRand = object
-    state: uint32
-
-proc initRand(x, z: int): CellRand =
-  var s = uint32((x * 73856093) xor (z * 19349663))
-  if s == 0: s = 1
-  return CellRand(state: s)
-
-proc nextFloat(r: var CellRand): float32 =
-  r.state = r.state * 1664525 + 1013904223
-  return float32(r.state and 0xFFFFFF) / 16777216.0'f32
-
 # --- Função para desenhar as Árvores Procedimentais ---
 proc drawTrees(camera: Camera, targetDirX, targetDirY, targetDirZ: float32, lightMult: float32, flashlightOn: bool) =
   const
-    TreeCellSize = 40.0'f32
-    TreeDensity = 0.20'f32
-    ViewDist = 350.0'f32
+    TreeCellSize = 40.0'f32 # Células maiores = menor densidade de árvores
+    TreeDensity = 0.20'f32  # 20% de chance de ter uma árvore por célula
+    ViewDist = 350.0'f32    # Alcance visual das árvores
     
     # Parâmetros da Lanterna
     FlashlightRange = 75.0'f32
@@ -256,60 +254,23 @@ proc drawTrees(camera: Camera, targetDirX, targetDirY, targetDirZ: float32, ligh
 
             drawSphere(leafPos, leafRadius, leafColor)
 
-# --- Função para determinar se o jogador está olhando diretamente para o vulto ---
-proc playerLookingAtVulto(camera: Camera): bool =
-  let toVultoX = vultoPos.x - camera.position.x
-  let toVultoY = vultoPos.y + 0.9'f32 - camera.position.y
-  let toVultoZ = vultoPos.z - camera.position.z
-  let distSq = toVultoX*toVultoX + toVultoY*toVultoY + toVultoZ*toVultoZ
-  if distSq < 0.001'f32: return false
-  
-  let dist = sqrt(distSq)
-  let normX = toVultoX / dist
-  let normY = toVultoY / dist
-  let normZ = toVultoZ / dist
-
-  let tDirX = camera.target.x - camera.position.x
-  let tDirY = camera.target.y - camera.position.y
-  let tDirZ = camera.target.z - camera.position.z
-  let tLen = sqrt(tDirX*tDirX + tDirY*tDirY + tDirZ*tDirZ)
-  let camDirX = if tLen > 0.001'f32: tDirX / tLen else: 0.0'f32
-  let camDirY = if tLen > 0.001'f32: tDirY / tLen else: 0.0'f32
-  let camDirZ = if tLen > 0.001'f32: tDirZ / tLen else: 0.0'f32
-
-  let cosAngle = normX * camDirX + normY * camDirY + normZ * camDirZ
-  return cosAngle >= 0.707'f32
-
-# --- Função para disparar a movimentação do Vulto de Terror ---
-proc dispararVultoDeTerror(camera: Camera) =
-  if vultoEmMovimento or vultoState == VultoJumpscare or vultoState == VultoGameOver: return
-
+# --- Inicializa o Vulto na distância de meio-termo (50% do alcance visual) ---
+proc iniciarVulto(camera: Camera) =
   const
     TreeCellSize = 40.0'f32
     TreeDensity = 0.20'f32
     ViewDist = 350.0'f32
-    VultoMaxDist = 300.0'f32
-
-  # Direção da mira do jogador para encontrar árvores no campo de visão
-  let tDirX = camera.target.x - camera.position.x
-  let tDirY = camera.target.y - camera.position.y
-  let tDirZ = camera.target.z - camera.position.z
-  let tLen = sqrt(tDirX*tDirX + tDirY*tDirY + tDirZ*tDirZ)
-  let camDirX = if tLen > 0.001'f32: tDirX / tLen else: 0.0'f32
-  let camDirZ = if tLen > 0.001'f32: tDirZ / tLen else: 0.0'f32
-
-  let targetDist = vultoTargetPercent * VultoMaxDist
-
-  var bestTreeX = 0.0'f32
-  var bestTreeZ = 0.0'f32
-  var foundTree = false
-  var minDiff = 999999.0'f32
+    TargetDist = 175.0'f32 # 50% de 350
 
   let gridCenterX = round(camera.position.x / TreeCellSize)
   let gridCenterZ = round(camera.position.z / TreeCellSize)
   let halfCells = int(ViewDist / TreeCellSize)
 
-  # 1. Busca a árvore renderizada cuja distância ao jogador é mais próxima do alvo
+  var bestTreeX = 0.0'f32
+  var bestTreeZ = 0.0'f32
+  var minDiff = 999999.0'f32
+  var found = false
+
   for cz in -halfCells .. halfCells:
     for cx in -halfCells .. halfCells:
       let cellX = int(gridCenterX) + cx
@@ -326,89 +287,50 @@ proc dispararVultoDeTerror(camera: Camera) =
         if treeY >= 2.5'f32:
           continue
 
-        let toPlayerX = treeX - camera.position.x
-        let toPlayerZ = treeZ - camera.position.z
-        let dist = sqrt(toPlayerX*toPlayerX + toPlayerZ*toPlayerZ)
+        let dx = treeX - camera.position.x
+        let dz = treeZ - camera.position.z
+        let dist = sqrt(dx*dx + dz*dz)
 
-        # Deve estar no campo de visão da câmera
-        let cosAngle = (toPlayerX * camDirX + toPlayerZ * camDirZ) / dist
-        if cosAngle >= 0.5'f32:
-          let diff = abs(dist - targetDist)
-          if diff < minDiff:
-            minDiff = diff
-            bestTreeX = treeX
-            bestTreeZ = treeZ
-            foundTree = true
+        let diff = abs(dist - TargetDist)
+        if diff < minDiff:
+          minDiff = diff
+          bestTreeX = treeX
+          bestTreeZ = treeZ
+          found = true
 
-  # Fallback caso não encontre nenhuma árvore no FOV: busca fora do FOV
-  if not foundTree:
-    minDiff = 999999.0'f32
-    for cz in -halfCells .. halfCells:
-      for cx in -halfCells .. halfCells:
-        let cellX = int(gridCenterX) + cx
-        let cellZ = int(gridCenterZ) + cz
+  if found:
+    vultoStartPos = Vector3(x: bestTreeX, y: getTerrainHeight(bestTreeX, bestTreeZ), z: bestTreeZ)
+    vultoEndPos = vultoStartPos
+    vultoPos = vultoStartPos
+    vultoProgress = 1.0'f32 # Força o primeiro pulo na próxima atualização
+    vultoSpeed = 0.5'f32   # Completa a travessia em 2 segundos
+    vultoAtivo = true
 
-        var r = initRand(cellX, cellZ)
-        if r.nextFloat() < TreeDensity:
-          let offsetX = r.nextFloat() * TreeCellSize
-          let offsetZ = r.nextFloat() * TreeCellSize
-          let treeX = float32(cellX) * TreeCellSize + offsetX
-          let treeZ = float32(cellZ) * TreeCellSize + offsetZ
-
-          let treeY = getTerrainHeight(treeX, treeZ)
-          if treeY >= 2.5'f32:
-            continue
-
-          let toPlayerX = treeX - camera.position.x
-          let toPlayerZ = treeZ - camera.position.z
-          let dist = sqrt(toPlayerX*toPlayerX + toPlayerZ*toPlayerZ)
-
-          let diff = abs(dist - targetDist)
-          if diff < minDiff:
-            minDiff = diff
-            bestTreeX = treeX
-            bestTreeZ = treeZ
-            foundTree = true
-
-  if foundTree:
-    # Se a melhor árvore for a que já está, não troca de lugar e continua nela
-    if bestTreeX == vultoTreeX and bestTreeZ == vultoTreeZ:
-      vultoStartPos = vultoPos
-      vultoEndPos = vultoPos
-      vultoProgress = 1.0'f32
-      vultoEmMovimento = false
-      vultoState = VultoIdle
-      vultoCooldownTimer = 2.0'f32
-      vultoSpottedDuringMove = false
-    else:
-      vultoStartPos = vultoPos
-      vultoEndPos = Vector3(x: bestTreeX, y: getTerrainHeight(bestTreeX, bestTreeZ), z: bestTreeZ)
-      vultoProgress = 0.0'f32
-      vultoSpeed = 1.0'f32 # Percurso completado em 1 segundo
-      vultoEmMovimento = true
-      vultoState = VultoMoving
-      vultoSpottedDuringMove = false
-
-# --- Função para posicionar o Vulto inicialmente no jogo ---
-proc inicializarVultoDeTerror(camera: Camera) =
+# --- Faz o vulto pular para a árvore mais próxima dele que esteja mais próxima do jogador ---
+proc proximaArvoreVulto(camera: Camera) =
   const
     TreeCellSize = 40.0'f32
     TreeDensity = 0.20'f32
-    TargetMidDist = 150.0'f32 # 50% de 300.0
+    SearchRadius = 3 # Pesquisa num raio de 3 células ao redor do vulto (~120 unidades)
 
-  let gridCenterX = round(camera.position.x / TreeCellSize)
-  let gridCenterZ = round(camera.position.z / TreeCellSize)
-  let searchRadius = 6
+  let startCellX = round(vultoEndPos.x / TreeCellSize)
+  let startCellZ = round(vultoEndPos.z / TreeCellSize)
 
-  var bestTreeX = 0.0'f32
-  var bestTreeZ = 0.0'f32
-  var minDiff = 999999.0'f32
+  var bestNextX = 0.0'f32
+  var bestNextZ = 0.0'f32
+  var minStepDistSq = 999999.0'f32
   var found = false
 
-  for cz in -searchRadius .. searchRadius:
-    for cx in -searchRadius .. searchRadius:
-      let cellX = int(gridCenterX) + cx
-      let cellZ = int(gridCenterZ) + cz
+  # Distância atual do vulto até o jogador
+  let dxCurr = vultoEndPos.x - camera.position.x
+  let dzCurr = vultoEndPos.z - camera.position.z
+  let distToPlayerCurrent = sqrt(dxCurr*dxCurr + dzCurr*dzCurr)
+
+  for cz in -SearchRadius .. SearchRadius:
+    for cx in -SearchRadius .. SearchRadius:
+      if cx == 0 and cz == 0: continue
+      let cellX = int(startCellX) + cx
+      let cellZ = int(startCellZ) + cz
 
       var r = initRand(cellX, cellZ)
       if r.nextFloat() < TreeDensity:
@@ -421,30 +343,62 @@ proc inicializarVultoDeTerror(camera: Camera) =
         if treeY >= 2.5'f32:
           continue
 
-        let toPlayerX = treeX - camera.position.x
-        let toPlayerZ = treeZ - camera.position.z
-        let dist = sqrt(toPlayerX*toPlayerX + toPlayerZ*toPlayerZ)
+        # Distância dessa árvore candidata até a posição atual do vulto
+        let dxToCurrent = treeX - vultoEndPos.x
+        let dzToCurrent = treeZ - vultoEndPos.z
+        let stepDistSq = dxToCurrent*dxToCurrent + dzToCurrent*dzToCurrent
 
-        let diff = abs(dist - TargetMidDist)
-        if diff < minDiff:
-          minDiff = diff
-          bestTreeX = treeX
-          bestTreeZ = treeZ
-          found = true
+        # Distância dessa árvore candidata até o jogador
+        let dxToPlayer = treeX - camera.position.x
+        let dzToPlayer = treeZ - camera.position.z
+        let distToPlayerNew = sqrt(dxToPlayer*dxToPlayer + dzToPlayer*dzToPlayer)
+
+        # Regras:
+        # 1. Deve ser uma árvore diferente (distSq > 1.0)
+        # 2. A nova árvore deve estar mais próxima do jogador do que a árvore atual (pelo menos 2.0 unidades mais perto)
+        if stepDistSq > 1.0'f32 and distToPlayerNew < distToPlayerCurrent - 2.0'f32:
+          # Escolhemos a árvore vizinha mais próxima da árvore atual
+          if stepDistSq < minStepDistSq:
+            minStepDistSq = stepDistSq
+            bestNextX = treeX
+            bestNextZ = treeZ
+            found = true
 
   if found:
-    vultoTreeX = bestTreeX
-    vultoTreeZ = bestTreeZ
-    vultoPos = Vector3(x: bestTreeX, y: getTerrainHeight(bestTreeX, bestTreeZ), z: bestTreeZ)
-    vultoEmMovimento = false
-    vultoAtivo = true
+    vultoStartPos = vultoEndPos
+    vultoEndPos = Vector3(x: bestNextX, y: getTerrainHeight(bestNextX, bestNextZ), z: bestNextZ)
+    vultoProgress = 0.0'f32
+    vultoSpeed = 0.5'f32 # Completa em 2 segundos
   else:
-    # Fallback seguro
-    vultoTreeX = camera.position.x + 150.0'f32
-    vultoTreeZ = camera.position.z + 50.0'f32
-    vultoPos = Vector3(x: vultoTreeX, y: getTerrainHeight(vultoTreeX, vultoTreeZ), z: vultoTreeZ)
-    vultoEmMovimento = false
-    vultoAtivo = true
+    # Se não houver árvores mais próximas do jogador no raio de busca, fica parado temporariamente
+    vultoStartPos = vultoEndPos
+    vultoProgress = 0.0'f32
+    vultoSpeed = 0.5'f32
+
+# --- Verifica se o jogador está olhando diretamente para o vulto ou para o seu destino ---
+proc jogadorEstaOlhando(camera: Camera, targetDir: Vector3, lightMult: float32, flashlightOn: bool): bool =
+  let positions = [vultoPos, vultoEndPos]
+  for P in positions:
+    let toTargetX = P.x - camera.position.x
+    let toTargetY = (P.y + 0.9'f32) - camera.position.y # Mira no centro do corpo do vulto
+    let toTargetZ = P.z - camera.position.z
+    let distSq = toTargetX*toTargetX + toTargetY*toTargetY + toTargetZ*toTargetZ
+    
+    if distSq < 350.0'f32 * 350.0'f32:
+      let dist = sqrt(distSq)
+      let cosAngle = (toTargetX * targetDir.x + toTargetY * targetDir.y + toTargetZ * targetDir.z) / dist
+      
+      # 0.82 é aproximadamente a cobertura visual horizontal do FOV da tela
+      if cosAngle >= 0.82'f32:
+        # De dia, vê automaticamente
+        if lightMult >= 0.3'f32:
+          return true
+        # De noite, precisa que a lanterna esteja ligada e apontada
+        elif flashlightOn and dist < 75.0'f32:
+          let cosSpot = (toTargetX * targetDir.x + toTargetY * targetDir.y + toTargetZ * targetDir.z) / dist
+          if cosSpot >= 0.96'f32:
+            return true
+  return false
 
 # Inicialização do jogo
 setTraceLogLevel(None)
@@ -498,148 +452,95 @@ while not windowShouldClose() and not shouldExit:
   if timeOfDay >= 24.0'f32:
     timeOfDay -= 24.0'f32
 
-  # Lógica do Vulto de Terror
-  if gameState == StatePlaying:
-    if not vultoAtivo:
-      vultoTargetPercent = 0.50'f32
-      inicializarVultoDeTerror(camera)
-      vultoState = VultoIdle
-      gameOverTimer = 10.0'f32
-      vultoCooldownTimer = 0.0'f32
-      vultoSpottedDuringMove = false
+  # Variáveis de mira usadas no cálculo da lanterna e detecção visual do vulto
+  let targetDirX = sin(cameraAngleX) * cos(cameraAngleY)
+  let targetDirY = sin(cameraAngleY)
+  let targetDirZ = -cos(cameraAngleX) * cos(cameraAngleY)
+  let targetDirVec = Vector3(x: targetDirX, y: targetDirY, z: targetDirZ)
 
-    # Distância 2D entre o jogador e a posição atual do vulto
-    let dist = sqrt(
-      (vultoPos.x - camera.position.x) * (vultoPos.x - camera.position.x) +
-      (vultoPos.z - camera.position.z) * (vultoPos.z - camera.position.z)
-    )
-    let isLooking = playerLookingAtVulto(camera)
+  let lightMult = getLightMultiplier(timeOfDay)
 
-    case vultoState:
-    of VultoIdle:
-      if vultoCooldownTimer > 0.0'f32:
-        vultoCooldownTimer -= dt
+  # Lógica do Vulto de Terror (Apenas se o jogo estiver ativo e não for Game Over)
+  if gameState == StatePlaying and not isGameOver:
+    # 1. Verifica se o jogador está visualizando o vulto ou seu destino
+    let playerSeesVulto = jogadorEstaOlhando(camera, targetDirVec, lightMult, flashlightOn)
+
+    if playerSeesVulto:
+      # Se viu o vulto, reinicia todos os temporizadores de alerta
+      vultoLookTimer = 15.0'f32
+      vultoContagemRegressiva = 10.0'f32
+      vultoEmAlerta = false
+    else:
+      # Se não estiver vendo, processa temporizadores
+      if not vultoEmAlerta:
+        vultoLookTimer -= dt
+        if vultoLookTimer <= 0.0'f32:
+          vultoLookTimer = 0.0'f32
+          vultoEmAlerta = true
       else:
-        # Se o vulto estiver na menor distância possível (10% de 300 = 30 unidades), ativa o countdown de 10s
-        if vultoTargetPercent <= 0.105'f32:
-          vultoState = VultoCountdown
-          gameOverTimer = 10.0'f32
-        else:
-          if isLooking:
-            # Se olhar para o vulto, afasta 10%
-            vultoTargetPercent = clamp(vultoTargetPercent + 0.10'f32, 0.10'f32, 0.50'f32)
-          else:
-            # Se não olhar, aproxima 10%
-            vultoTargetPercent = clamp(vultoTargetPercent - 0.10'f32, 0.10'f32, 0.50'f32)
-          
-          dispararVultoDeTerror(camera)
+        vultoContagemRegressiva -= dt
+        if vultoContagemRegressiva <= 0.0'f32:
+          vultoContagemRegressiva = 0.0'f32
+          isGameOver = true
+          enableCursor() # Libera o cursor para os botões da tela de Game Over
 
-    of VultoMoving:
-      # Se o jogador olhar para o vulto enquanto ele corre entre as árvores, marca como avistado
-      if isLooking:
-        vultoSpottedDuringMove = true
-
-      # Progresso da corrida de árvore a árvore
+    # 2. Atualiza a movimentação contínua do vulto (se move a cada 2 segundos)
+    if vultoAtivo:
       vultoProgress += dt * vultoSpeed
       if vultoProgress >= 1.0'f32:
         vultoProgress = 1.0'f32
-        vultoEmMovimento = false
-        vultoTreeX = vultoEndPos.x
-        vultoTreeZ = vultoEndPos.z
         vultoPos = vultoEndPos
-        vultoState = VultoIdle
-        vultoCooldownTimer = 2.0'f32 # Aguarda pelo menos 2 segundos parado na árvore
-        
-        # Se foi avistado durante a movimentação, aumenta em 10% a distância
-        if vultoSpottedDuringMove:
-          vultoTargetPercent = clamp(vultoTargetPercent + 0.10'f32, 0.10'f32, 0.50'f32)
-          vultoSpottedDuringMove = false
+        # Busca a próxima árvore mais próxima dele e do jogador
+        proximaArvoreVulto(camera)
       else:
+        # Desliza colado ao relevo do chão
         let t = vultoProgress
         let cx = vultoStartPos.x + (vultoEndPos.x - vultoStartPos.x) * t
         let cz = vultoStartPos.z + (vultoEndPos.z - vultoStartPos.z) * t
         let cy = getTerrainHeight(cx, cz)
         vultoPos = Vector3(x: cx, y: cy, z: cz)
 
-    of VultoCountdown:
-      if isLooking:
-        # Se avistar o vulto (ou a árvore dele) durante a contagem regressiva, cancela e afasta 10%
-        vultoTargetPercent = clamp(vultoTargetPercent + 0.10'f32, 0.10'f32, 0.50'f32)
-        dispararVultoDeTerror(camera)
-      else:
-        gameOverTimer -= dt
-        if gameOverTimer <= 0.0'f32:
-          gameOverTimer = 0.0'f32
-          vultoState = VultoJumpscare
-
-    of VultoJumpscare:
-      # Força a câmera a fixar o alvo na direção do vulto
-      let toVultoX = vultoPos.x - camera.position.x
-      let toVultoY = vultoPos.y + 0.9'f32 - camera.position.y
-      let toVultoZ = vultoPos.z - camera.position.z
-      let vDist = sqrt(toVultoX*toVultoX + toVultoY*toVultoY + toVultoZ*toVultoZ)
-      
-      if vDist > 0.1'f32:
-        camera.target = Vector3(
-          x: camera.position.x + (toVultoX / vDist),
-          y: camera.position.y + (toVultoY / vDist),
-          z: camera.position.z + (toVultoZ / vDist)
-        )
-
-      # Vulto caminha diretamente em direção ao jogador
-      if vDist > 2.5'f32:
-        let walkSpeed = 6.0'f32
-        vultoPos.x += (toVultoX / vDist) * walkSpeed * dt
-        vultoPos.z += (toVultoZ / vDist) * walkSpeed * dt
-        vultoPos.y = getTerrainHeight(vultoPos.x, vultoPos.z)
-      else:
-        # Chegou no usuário, ativa a tela preta de Game Over
-        vultoState = VultoGameOver
-        enableCursor()
-
-    of VultoGameOver:
-      discard
-
   # Lógica de estados do jogo
   if gameState == StatePlaying:
-    # Retorna ao menu ao pressionar ESC (pausa) - bloqueado no jumpscare e gameover
-    if isKeyPressed(Escape) and vultoState != VultoJumpscare and vultoState != VultoGameOver:
-      gameState = StateMainMenu
-      enableCursor()
-
-    # Lógica de controle e bateria da Lanterna
-    if isKeyPressed(F) and vultoState != VultoJumpscare and vultoState != VultoGameOver:
-      if flashlightBattery > 0.0'f32 or not flashlightOn:
-        flashlightOn = not flashlightOn
-
-    if flashlightOn:
-      flashlightBattery -= dt * 0.1'f32
-      if flashlightBattery <= 0.0'f32:
-        flashlightBattery = 0.0'f32
-        flashlightOn = false
+    if isGameOver:
+      discard # Desativa controles durante o Game Over
     else:
-      if flashlightBattery < 1.0'f32:
-        flashlightBattery += dt * 0.1'f32
-        if flashlightBattery > 1.0'f32:
-          flashlightBattery = 1.0'f32
+      # Retorna ao menu ao pressionar ESC (pausa)
+      if isKeyPressed(Escape):
+        gameState = StateMainMenu
+        enableCursor()
 
-    # 1. Controle da Câmera (Mouse) - bloqueado no jumpscare e gameover
-    if vultoState != VultoJumpscare and vultoState != VultoGameOver:
+      # Lógica de controle e bateria da Lanterna
+      if isKeyPressed(F):
+        if flashlightBattery > 0.0'f32 or not flashlightOn:
+          flashlightOn = not flashlightOn
+
+      if flashlightOn:
+        flashlightBattery -= dt * 0.1'f32
+        if flashlightBattery <= 0.0'f32:
+          flashlightBattery = 0.0'f32
+          flashlightOn = false
+      else:
+        if flashlightBattery < 1.0'f32:
+          flashlightBattery += dt * 0.1'f32
+          if flashlightBattery > 1.0'f32:
+            flashlightBattery = 1.0'f32
+
+      # 1. Controle da Câmera (Mouse)
       let mouseDelta = getMouseDelta()
       cameraAngleX += mouseDelta.x * mouseSensitivity
       cameraAngleY -= mouseDelta.y * mouseSensitivity
       cameraAngleY = clamp(cameraAngleY, -1.5'f32, 1.5'f32)
 
-    let forwardX = sin(cameraAngleX)
-    let forwardZ = -cos(cameraAngleX)
-    let rightX = cos(cameraAngleX)
-    let rightZ = sin(cameraAngleX)
+      let forwardX = sin(cameraAngleX)
+      let forwardZ = -cos(cameraAngleX)
+      let rightX = cos(cameraAngleX)
+      let rightZ = sin(cameraAngleX)
 
-    # 2. Movimentação do Jogador (WASD) - bloqueada no jumpscare e gameover
-    var dx = 0.0'f32
-    var dz = 0.0'f32
+      # 2. Movimentação do Jogador (WASD)
+      var dx = 0.0'f32
+      var dz = 0.0'f32
 
-    if vultoState != VultoJumpscare and vultoState != VultoGameOver:
       if isKeyDown(W):
         dx += forwardX
         dz += forwardZ
@@ -653,14 +554,13 @@ while not windowShouldClose() and not shouldExit:
         dx += rightX
         dz += rightZ
 
-    let len = sqrt(dx*dx + dz*dz)
-    let isMoving = len > 0.001'f32
-    let wantSprint = isKeyDown(LeftShift) or isKeyDown(RightShift)
-    let canSprint = wantSprint and isMoving and stamina > 0.0'f32
-    
-    let moveSpeed = if canSprint: 16.0'f32 else: 8.0'f32
-    
-    if vultoState != VultoJumpscare and vultoState != VultoGameOver:
+      let len = sqrt(dx*dx + dz*dz)
+      let isMoving = len > 0.001'f32
+      let wantSprint = isKeyDown(LeftShift) or isKeyDown(RightShift)
+      let canSprint = wantSprint and isMoving and stamina > 0.0'f32
+      
+      let moveSpeed = if canSprint: 16.0'f32 else: 8.0'f32
+      
       if canSprint:
         stamina -= dt * 0.2'f32 # Consome tudo em 5 segundos
         if stamina < 0.0'f32: stamina = 0.0'f32
@@ -669,79 +569,78 @@ while not windowShouldClose() and not shouldExit:
           stamina += dt * 0.2'f32 # Recarrega tudo em 5 segundos
           if stamina > 1.0'f32: stamina = 1.0'f32
 
-    if isMoving and vultoState != VultoJumpscare and vultoState != VultoGameOver:
-      camera.position.x += (dx / len) * moveSpeed * dt
-      camera.position.z += (dz / len) * moveSpeed * dt
+      if isMoving:
+        camera.position.x += (dx / len) * moveSpeed * dt
+        camera.position.z += (dz / len) * moveSpeed * dt
 
-    # --- Colisão do Jogador com as Árvores ---
-    const
-      TreeCellSize = 40.0'f32
-      TreeDensity = 0.20'f32
-      PlayerRadius = 0.4'f32
+      # --- Colisão do Jogador com as Árvores ---
+      const
+        TreeCellSize = 40.0'f32
+        TreeDensity = 0.20'f32
+        PlayerRadius = 0.4'f32
 
-    let pCellX = round(camera.position.x / TreeCellSize)
-    let pCellZ = round(camera.position.z / TreeCellSize)
+      let pCellX = round(camera.position.x / TreeCellSize)
+      let pCellZ = round(camera.position.z / TreeCellSize)
 
-    # Verifica a célula atual e as 8 vizinhas
-    for cz in -1 .. 1:
-      for cx in -1 .. 1:
-        let cellX = int(pCellX) + cx
-        let cellZ = int(pCellZ) + cz
+      # Verifica a célula atual e as 8 vizinhas
+      for cz in -1 .. 1:
+        for cx in -1 .. 1:
+          let cellX = int(pCellX) + cx
+          let cellZ = int(pCellZ) + cz
 
-        var r = initRand(cellX, cellZ)
-        if r.nextFloat() < TreeDensity:
-          # Gera a posição exata da árvore
-          let offsetX = r.nextFloat() * TreeCellSize
-          let offsetZ = r.nextFloat() * TreeCellSize
-          let treeX = float32(cellX) * TreeCellSize + offsetX
-          let treeZ = float32(cellZ) * TreeCellSize + offsetZ
-          
-          # Apenas processa colisão se a árvore puder crescer nesta altura (área verde)
-          let treeY = getTerrainHeight(treeX, treeZ)
-          if treeY >= 2.5'f32:
-            continue
+          var r = initRand(cellX, cellZ)
+          if r.nextFloat() < TreeDensity:
+            # Gera a posição exata da árvore
+            let offsetX = r.nextFloat() * TreeCellSize
+            let offsetZ = r.nextFloat() * TreeCellSize
+            let treeX = float32(cellX) * TreeCellSize + offsetX
+            let treeZ = float32(cellZ) * TreeCellSize + offsetZ
+            
+            # Apenas processa colisão se a árvore puder crescer nesta altura (área verde)
+            let treeY = getTerrainHeight(treeX, treeZ)
+            if treeY >= 2.5'f32:
+              continue
 
-          let trunkRadius = 0.25'f32 + r.nextFloat() * 0.2'f32
+            let trunkRadius = 0.25'f32 + r.nextFloat() * 0.2'f32
 
-          # Vetor da árvore até o jogador (2D)
-          let toPlayerX = camera.position.x - treeX
-          let toPlayerZ = treeZ - camera.position.z
-          let distSq = toPlayerX*toPlayerX + toPlayerZ*toPlayerZ
-          let minDist = PlayerRadius + trunkRadius
+            # Vetor da árvore até o jogador (2D)
+            let toPlayerX = camera.position.x - treeX
+            let toPlayerZ = camera.position.z - treeZ
+            let distSq = toPlayerX*toPlayerX + toPlayerZ*toPlayerZ
+            let minDist = PlayerRadius + trunkRadius
 
-          # Se houver colisão, empurra o jogador para fora
-          if distSq < minDist * minDist and vultoState != VultoJumpscare and vultoState != VultoGameOver:
-            let dist = sqrt(distSq)
-            if dist > 0.001'f32:
-              let overlap = minDist - dist
-              camera.position.x += (toPlayerX / dist) * overlap
-              camera.position.z += (toPlayerZ / dist) * overlap
+            # Se houver colisão, empurra o jogador para fora
+            if distSq < minDist * minDist:
+              let dist = sqrt(distSq)
+              if dist > 0.001'f32:
+                let overlap = minDist - dist
+                camera.position.x += (toPlayerX / dist) * overlap
+                camera.position.z += (toPlayerZ / dist) * overlap
 
-    # 3. Gravidade e Pulo sobre o Terreno
-    let groundHeight = getTerrainHeight(camera.position.x, camera.position.z)
+      # 3. Gravidade e Pulo sobre o Terreno
+      let groundHeight = getTerrainHeight(camera.position.x, camera.position.z)
 
-    if not isGrounded:
-      velY -= Gravity * dt
-      camera.position.y += velY * dt
+      if not isGrounded:
+        velY -= Gravity * dt
+        camera.position.y += velY * dt
 
-      # Colisão com o terreno dinâmico (aterrissagem)
-      if camera.position.y <= groundHeight + EyeHeight:
+        # Colisão com o terreno dinâmico (aterrissagem)
+        if camera.position.y <= groundHeight + EyeHeight:
+          camera.position.y = groundHeight + EyeHeight
+          velY = 0.0'f32
+          isGrounded = true
+      else:
+        # Acompanha o relevo
         camera.position.y = groundHeight + EyeHeight
-        velY = 0.0'f32
-        isGrounded = true
-    else:
-      # Acompanha o relevo
-      camera.position.y = groundHeight + EyeHeight
-      
-      if isKeyPressed(Space) and vultoState != VultoJumpscare and vultoState != VultoGameOver:
-        velY = JumpForce
-        isGrounded = false
+        
+        if isKeyPressed(Space):
+          velY = JumpForce
+          isGrounded = false
 
-    # Atualiza o alvo (target) baseado na mira se não estiver no jumpscare
-    if vultoState != VultoJumpscare and vultoState != VultoGameOver:
-      camera.target.x = camera.position.x + forwardX * cos(cameraAngleY)
-      camera.target.y = camera.position.y + sin(cameraAngleY)
-      camera.target.z = camera.position.z + forwardZ * cos(cameraAngleY)
+      # Atualiza o alvo (target) baseado na mira
+      camera.target.x = camera.position.x + targetDirX
+      camera.target.y = camera.position.y + targetDirY
+      camera.target.z = camera.position.z + targetDirZ
 
   else:
     # Se pressionar ESC no menu, fecha o jogo; nas opções, volta para o menu principal
@@ -763,15 +662,9 @@ while not windowShouldClose() and not shouldExit:
     # Mantém o alvo olhando para o centro da cena
     camera.target = Vector3(x: 0.0'f32, y: getTerrainHeight(0.0'f32, 0.0'f32), z: 0.0'f32)
 
-  # Variáveis de mira usadas no cálculo da lanterna e culling
-  let targetDirX = sin(cameraAngleX) * cos(cameraAngleY)
-  let targetDirY = sin(cameraAngleY)
-  let targetDirZ = -cos(cameraAngleX) * cos(cameraAngleY)
-
   # 5. Desenho do cenário
   drawing:
     let skyColor = getSkyColor(timeOfDay)
-    let lightMult = getLightMultiplier(timeOfDay)
     
     clearBackground(skyColor)
     
@@ -877,7 +770,11 @@ while not windowShouldClose() and not shouldExit:
       if button(Rectangle(x: btnX, y: screenHeight/2 - 40, width: btnWidth, height: btnHeight), "Iniciar"):
         gameState = StatePlaying
         disableCursor()
-        inicializarVultoDeTerror(camera)
+        iniciarVulto(camera)
+        vultoLookTimer = 15.0'f32
+        vultoContagemRegressiva = 10.0'f32
+        vultoEmAlerta = false
+        isGameOver = false
 
       if button(Rectangle(x: btnX, y: screenHeight/2 + 20, width: btnWidth, height: btnHeight), "Opcoes"):
         gameState = StateOptionsMenu
@@ -909,102 +806,93 @@ while not windowShouldClose() and not shouldExit:
       if button(Rectangle(x: optX, y: screenHeight/2 + 60, width: optWidth, height: 40), "Voltar"):
         gameState = StateMainMenu
 
-    else:
-      # --- JOGO ATIVO ---
-      # 1. Desenha o escurecimento de tela conforme o estado do vulto
-      let dist = sqrt(
-        (vultoPos.x - camera.position.x) * (vultoPos.x - camera.position.x) +
-        (vultoPos.z - camera.position.z) * (vultoPos.z - camera.position.z)
-      )
+    elif isGameOver:
+      # --- TELA DE GAME OVER ---
+      drawRectangle(0, 0, int32(screenWidth), int32(screenHeight), Color(r: 0, g: 0, b: 0, a: 255))
       
-      var alpha = 0.0'f32
-      if vultoState == VultoJumpscare:
-        alpha = clamp((45.0'f32 - dist) / 45.0'f32, 0.0'f32, 1.0'f32) * 255.0'f32
-      elif vultoState == VultoGameOver:
-        alpha = 255.0'f32
-      elif vultoState == VultoCountdown:
-        # Escurece a tela de 0 a 255 conforme o timer de 10s cai para 0
-        alpha = (1.0'f32 - (gameOverTimer / 10.0'f32)) * 255.0'f32
+      let goText = "VOCE FOI CONSUMIDO PELA ESCURIDAO"
+      let goFontSize = 32.int32
+      let goTextWidth = measureText(goText, goFontSize).float32
+      drawText(goText, int32(screenWidth/2 - goTextWidth/2), int32(screenHeight/2 - 100), goFontSize, Red)
 
-      if alpha > 0.0'f32:
-        drawRectangle(0, 0, int32(screenWidth), int32(screenHeight), Color(r: 0, g: 0, b: 0, a: uint8(alpha)))
+      let btnWidth = 220.float32
+      let btnHeight = 40.float32
+      let btnX = screenWidth/2 - btnWidth/2
 
-      # 2. Se for Game Over, exibe a interface de Game Over
-      if vultoState == VultoGameOver:
-        let goText = "GAME OVER"
-        let goFontSize = 50.int32
-        let goWidth = measureText(goText, goFontSize).float32
-        drawText(goText, int32(screenWidth/2 - goWidth/2), int32(screenHeight/2 - 100), goFontSize, Red)
-
-        let descText = "Voce nao avistou o vulto a tempo..."
-        let descFontSize = 20.int32
-        let descWidth = measureText(descText, descFontSize).float32
-        drawText(descText, int32(screenWidth/2 - descWidth/2), int32(screenHeight/2 - 30), descFontSize, RayWhite)
-
-        let btnWidth = 200.float32
-        let btnHeight = 40.float32
-        let btnX = screenWidth/2 - btnWidth/2
-
-        if button(Rectangle(x: btnX, y: screenHeight/2 + 30, width: btnWidth, height: btnHeight), "Tentar Novamente"):
-          vultoAtivo = false
-          vultoState = VultoIdle
-          vultoTargetPercent = 0.50'f32
-          gameState = StatePlaying
-          disableCursor()
-          
-          # Reseta dados do jogador
-          camera.position = Vector3(x: 0.0'f32, y: startHeight + EyeHeight, z: 0.0'f32)
-          camera.target = Vector3(x: 0.0'f32, y: startHeight + EyeHeight, z: -1.0'f32)
-          cameraAngleX = 0.0'f32
-          cameraAngleY = 0.0'f32
-          flashlightBattery = 1.0'f32
-          stamina = 1.0'f32
-          flashlightOn = false
-          inicializarVultoDeTerror(camera)
-
-        if button(Rectangle(x: btnX, y: screenHeight/2 + 85, width: btnWidth, height: btnHeight), "Menu Principal"):
-          vultoAtivo = false
-          vultoState = VultoIdle
-          gameState = StateMainMenu
-          enableCursor()
-
-      else:
-        # --- UI DE STATUS (Relógio, Lanterna, Energia) ---
-        let hours = int(timeOfDay)
-        let minutes = int((timeOfDay - float32(hours)) * 60.0'f32)
-        let timeStr = fmt"{hours:02}:{minutes:02}"
+      if button(Rectangle(x: btnX, y: screenHeight/2 + 10, width: btnWidth, height: btnHeight), "Tentar Novamente"):
+        let startHeight = getTerrainHeight(0.0'f32, 0.0'f32)
+        camera.position = Vector3(x: 0.0'f32, y: startHeight + EyeHeight, z: 0.0'f32)
+        camera.target = Vector3(x: 0.0'f32, y: startHeight + EyeHeight, z: -1.0'f32)
+        cameraAngleX = 0.0'f32
+        cameraAngleY = 0.0'f32
+        velY = 0.0'f32
+        isGrounded = true
+        timeOfDay = 12.0'f32
+        flashlightOn = false
+        flashlightBattery = 1.0'f32
+        stamina = 1.0'f32
         
-        let hasFlashlight = flashlightBattery < 1.0'f32
-        let hasStamina = stamina < 1.0'f32
-        
-        let panelWidth = 240.float32
-        let panelX = screenWidth - panelWidth - 20.float32
-        let panelY = 20.float32
-        
-        var panelHeight = 40.float32 # Apenas relógio
-        if hasFlashlight: panelHeight += 30.float32
-        if hasStamina: panelHeight += 30.float32
-        
-        panel(Rectangle(x: panelX, y: panelY, width: panelWidth, height: panelHeight), "")
-        label(Rectangle(x: panelX + 15.float32, y: panelY + 10.float32, width: panelWidth - 30.float32, height: 20.float32), "Hora: " & timeStr)
-        
-        var elementY = panelY + 40.float32
-        let pbWidth = 140.float32
-        let pbHeight = 16.float32
-        let pbX = panelX + 85.float32
-        
-        if hasFlashlight:
-          progressBar(Rectangle(x: pbX, y: elementY, width: pbWidth, height: pbHeight), "Lanterna", "", flashlightBattery, 0.0'f32, 1.0'f32)
-          elementY += 30.float32
-          
-        if hasStamina:
-          progressBar(Rectangle(x: pbX, y: elementY, width: pbWidth, height: pbHeight), "Energia", "", stamina, 0.0'f32, 1.0'f32)
-          elementY += 30.float32
+        iniciarVulto(camera)
+        vultoLookTimer = 15.0'f32
+        vultoContagemRegressiva = 10.0'f32
+        vultoEmAlerta = false
+        isGameOver = false
+        disableCursor()
 
-        # Exibe aviso sutil de contagem regressiva se estiver ativo
-        if vultoState == VultoCountdown:
-          let ctText = fmt"O vulto esta proximo! {int(ceil(gameOverTimer))}s"
-          let ctWidth = measureText(ctText, 20).float32
-          drawText(ctText, int32(screenWidth/2 - ctWidth/2), 60, 20, Red)
+      if button(Rectangle(x: btnX, y: screenHeight/2 + 70, width: btnWidth, height: btnHeight), "Voltar ao Menu"):
+        gameState = StateMainMenu
+        isGameOver = false
+
+    else:
+      # --- JOGO ATIVO (UI UNIFICADA DE STATUS) ---
+      let hours = int(timeOfDay)
+      let minutes = int((timeOfDay - float32(hours)) * 60.0'f32)
+      let timeStr = fmt"{hours:02}:{minutes:02}"
+      
+      let hasFlashlight = flashlightBattery < 1.0'f32
+      let hasStamina = stamina < 1.0'f32
+      
+      # Largura e posições
+      let panelWidth = 240.float32
+      let panelX = screenWidth - panelWidth - 20.float32
+      let panelY = 20.float32
+      
+      # Altura dinâmica baseada na visibilidade dos elementos
+      var panelHeight = 40.float32 # Apenas para o relógio
+      if hasFlashlight: panelHeight += 30.float32
+      if hasStamina: panelHeight += 30.float32
+      
+      # 1. Desenha o Painel de Status unificado do RayGui
+      panel(Rectangle(x: panelX, y: panelY, width: panelWidth, height: panelHeight), "")
+      
+      # 2. Desenha o Relógio (usando o Label do RayGui)
+      label(Rectangle(x: panelX + 15.float32, y: panelY + 10.float32, width: panelWidth - 30.float32, height: 20.float32), "Hora: " & timeStr)
+      
+      # 3. Desenha as barras de progresso (Lanterna e Energia) dentro do painel
+      var elementY = panelY + 40.float32
+      let pbWidth = 140.float32
+      let pbHeight = 16.float32
+      let pbX = panelX + 85.float32 # Dá espaço de 70px para o texto da label à esquerda
+      
+      if hasFlashlight:
+        progressBar(Rectangle(x: pbX, y: elementY, width: pbWidth, height: pbHeight), "Lanterna", "", flashlightBattery, 0.0'f32, 1.0'f32)
+        elementY += 30.float32
+        
+      if hasStamina:
+        progressBar(Rectangle(x: pbX, y: elementY, width: pbWidth, height: pbHeight), "Energia", "", stamina, 0.0'f32, 1.0'f32)
+        elementY += 30.float32
+
+      # --- Efeito de Escurecimento de Contagem Regressiva do Vulto ---
+      if vultoEmAlerta:
+        let alpha = clamp((10.0'f32 - vultoContagemRegressiva) / 10.0'f32, 0.0'f32, 1.0'f32)
+        let alphaByte = uint8(alpha * 255.0'f32)
+        drawRectangle(0, 0, int32(screenWidth), int32(screenHeight), Color(r: 0, g: 0, b: 0, a: alphaByte))
+        
+        # Texto piscante vermelho informando o perigo iminente
+        let alertText = "ALGO ESTA SE APROXIMANDO... PROCURE-O!"
+        let alertFontSize = 20.int32
+        let alertTextWidth = measureText(alertText, alertFontSize).float32
+        let textAlpha = uint8(150 + int(sin(getTime() * 8.0) * 105.0)) # Pisca rapidamente
+        drawText(alertText, int32(screenWidth/2 - alertTextWidth/2), int32(screenHeight - 80), alertFontSize, Color(r: 220, g: 0, b: 0, a: textAlpha))
 
 closeWindow()
